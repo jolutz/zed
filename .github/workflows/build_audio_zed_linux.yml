@@ -1,0 +1,64 @@
+name: build_audio_zed_linux
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - audio-file-viewer
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+
+jobs:
+  build_linux_x86_64:
+    name: Build Linux x86_64 bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux dependencies
+        run: ./script/linux
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Check audio viewer
+        run: cargo check -p audio_viewer
+
+      - name: Build Linux bundle
+        run: ./script/bundle-linux
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: zed-linux-x86_64.tar.gz
+          path: target/release/zed-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+      - name: Publish latest custom build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_tag="audio-zed-linux-latest"
+          asset="target/release/zed-linux-x86_64.tar.gz"
+
+          if ! gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release create "$release_tag" \
+              --target "$GITHUB_SHA" \
+              --title "Latest audio Zed Linux build" \
+              --notes "Latest custom Kubuntu-focused Zed build from the audio-file-viewer branch." \
+              --prerelease
+          fi
+
+          gh release upload "$release_tag" "$asset" --clobber
