@@ -5470,6 +5470,7 @@ mod tests {
                 cx,
             );
             image_viewer::init(cx);
+            audio_viewer::init(cx);
             language_model::init(cx);
             client::RefreshLlmTokenListener::register(
                 app_state.client.clone(),
