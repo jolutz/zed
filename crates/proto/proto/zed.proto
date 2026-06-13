@@ -2,6 +2,7 @@ syntax = "proto3";
 package zed.messages;
 
 import "ai.proto";
+import "audio.proto";
 import "app.proto";
 import "buffer.proto";
 import "call.proto";
@@ -488,7 +489,10 @@ message Envelope {
     GetDocumentLinks get_document_links = 453;
     GetDocumentLinksResponse get_document_links_response = 454;
     ResolveDocumentLink resolve_document_link = 455;
-    ResolveDocumentLinkResponse resolve_document_link_response = 456; // current max
+    ResolveDocumentLinkResponse resolve_document_link_response = 456;
+    OpenAudioByPath open_audio_by_path = 457;
+    OpenAudioResponse open_audio_response = 458;
+    CreateAudioForPeer create_audio_for_peer = 459; // current max
   }
 
   reserved 87 to 88;

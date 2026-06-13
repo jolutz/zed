@@ -1,0 +1,35 @@
+syntax = "proto3";
+package zed.messages;
+
+import "core.proto";
+import "worktree.proto";
+
+message OpenAudioByPath {
+  uint64 project_id = 1;
+  uint64 worktree_id = 2;
+  string path = 3;
+}
+
+message OpenAudioResponse {
+  uint64 audio_id = 1;
+}
+
+message CreateAudioForPeer {
+  uint64 project_id = 1;
+  PeerId peer_id = 2;
+  oneof variant {
+    AudioState state = 3;
+    AudioChunk chunk = 4;
+  }
+}
+
+message AudioState {
+  uint64 id = 1;
+  optional File file = 2;
+  uint64 content_size = 3;
+}
+
+message AudioChunk {
+  uint64 audio_id = 1;
+  bytes data = 2;
+}

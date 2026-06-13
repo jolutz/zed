@@ -1,5 +1,6 @@
 pub mod agent_registry_store;
 pub mod agent_server_store;
+pub mod audio_store;
 pub mod bookmark_store;
 pub mod buffer_store;
 pub mod color_extractor;
@@ -46,6 +47,7 @@ use crate::{
 };
 pub use agent_registry_store::{AgentRegistryStore, RegistryAgent};
 pub use agent_server_store::{AgentId, AgentServerStore, AgentServersUpdated, ExternalAgentSource};
+pub use audio_store::{AudioItem, AudioItemEvent, AudioStore, AudioStoreEvent};
 pub use git_store::{
     ConflictRegion, ConflictSet, ConflictSetSnapshot, ConflictSetUpdate,
     git_traversal::{ChildEntriesGitIter, GitEntry, GitEntryRef, GitTraversal},
@@ -233,6 +235,7 @@ pub struct Project {
     worktree_store: Entity<WorktreeStore>,
     buffer_store: Entity<BufferStore>,
     context_server_store: Entity<ContextServerStore>,
+    audio_store: Entity<AudioStore>,
     image_store: Entity<ImageStore>,
     lsp_store: Entity<LspStore>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -1151,6 +1154,7 @@ impl Project {
         client.add_entity_request_handler(Self::handle_open_new_buffer);
         client.add_entity_message_handler(Self::handle_create_buffer_for_peer);
         client.add_entity_message_handler(Self::handle_toggle_lsp_logs);
+        client.add_entity_message_handler(Self::handle_create_audio_for_peer);
         client.add_entity_message_handler(Self::handle_create_image_for_peer);
         client.add_entity_request_handler(Self::handle_find_search_candidates_chunk);
         client.add_entity_message_handler(Self::handle_find_search_candidates_cancel);
@@ -1249,6 +1253,9 @@ impl Project {
             let image_store = cx.new(|cx| ImageStore::local(worktree_store.clone(), cx));
             cx.subscribe(&image_store, Self::on_image_store_event)
                 .detach();
+            let audio_store = cx.new(|cx| AudioStore::local(worktree_store.clone(), cx));
+            cx.subscribe(&audio_store, Self::on_audio_store_event)
+                .detach();
 
             let prettier_store = cx.new(|cx| {
                 PrettierStore::new(
@@ -1329,6 +1336,7 @@ impl Project {
                 collaborators: Default::default(),
                 worktree_store,
                 buffer_store,
+                audio_store,
                 image_store,
                 lsp_store,
                 context_server_store,
@@ -1431,6 +1439,14 @@ impl Project {
             });
             let image_store = cx.new(|cx| {
                 ImageStore::remote(
+                    worktree_store.clone(),
+                    remote.read(cx).proto_client(),
+                    REMOTE_SERVER_PROJECT_ID,
+                    cx,
+                )
+            });
+            let audio_store = cx.new(|cx| {
+                AudioStore::remote(
                     worktree_store.clone(),
                     remote.read(cx).proto_client(),
                     REMOTE_SERVER_PROJECT_ID,
@@ -1555,6 +1571,7 @@ impl Project {
                 collaborators: Default::default(),
                 worktree_store,
                 buffer_store,
+                audio_store,
                 image_store,
                 lsp_store,
                 context_server_store,
@@ -1625,6 +1642,7 @@ impl Project {
             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.agent_server_store);
 
             remote_proto.add_entity_message_handler(Self::handle_create_buffer_for_peer);
+            remote_proto.add_entity_message_handler(Self::handle_create_audio_for_peer);
             remote_proto.add_entity_message_handler(Self::handle_create_image_for_peer);
             remote_proto.add_entity_message_handler(Self::handle_create_file_for_peer);
             remote_proto.add_entity_message_handler(Self::handle_update_worktree);
@@ -1737,6 +1755,9 @@ impl Project {
         });
         let image_store = cx.new(|cx| {
             ImageStore::remote(worktree_store.clone(), client.clone().into(), remote_id, cx)
+        });
+        let audio_store = cx.new(|cx| {
+            AudioStore::remote(worktree_store.clone(), client.clone().into(), remote_id, cx)
         });
 
         let environment =
@@ -1855,6 +1876,7 @@ impl Project {
             let mut project = Self {
                 buffer_ordered_messages_tx: tx,
                 buffer_store: buffer_store.clone(),
+                audio_store,
                 image_store,
                 worktree_store: worktree_store.clone(),
                 lsp_store: lsp_store.clone(),
@@ -3347,6 +3369,20 @@ impl Project {
         })
     }
 
+    pub fn open_audio(
+        &mut self,
+        path: impl Into<ProjectPath>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AudioItem>>> {
+        if self.is_disconnected(cx) {
+            return Task::ready(Err(anyhow!(ErrorCode::Disconnected)));
+        }
+
+        self.audio_store.update(cx, |audio_store, cx| {
+            audio_store.open_audio(path.into(), cx)
+        })
+    }
+
     async fn send_buffer_ordered_messages(
         project: WeakEntity<Self>,
         rx: UnboundedReceiver<BufferOrderedMessage>,
@@ -3499,6 +3535,30 @@ impl Project {
                 .detach();
             }
         }
+    }
+
+    fn on_audio_store_event(
+        &mut self,
+        _: Entity<AudioStore>,
+        event: &AudioStoreEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            AudioStoreEvent::AudioAdded(audio) => {
+                cx.subscribe(audio, |this, audio, event, cx| {
+                    this.on_audio_event(audio, event, cx);
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn on_audio_event(
+        &mut self,
+        _audio: Entity<AudioItem>,
+        _event: &AudioItemEvent,
+        _cx: &mut Context<Self>,
+    ) {
     }
 
     fn on_dap_store_event(
@@ -5710,6 +5770,18 @@ impl Project {
         this.update(&mut cx, |this, cx| {
             this.image_store.update(cx, |image_store, cx| {
                 image_store.handle_create_image_for_peer(envelope, cx)
+            })
+        })
+    }
+
+    async fn handle_create_audio_for_peer(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::CreateAudioForPeer>,
+        mut cx: AsyncApp,
+    ) -> Result<()> {
+        this.update(&mut cx, |this, cx| {
+            this.audio_store.update(cx, |audio_store, cx| {
+                audio_store.handle_create_audio_for_peer(envelope, cx)
             })
         })
     }
