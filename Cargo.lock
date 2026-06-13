@@ -1389,6 +1389,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio_viewer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "file_icons",
+ "gpui",
+ "language",
+ "log",
+ "project",
+ "rodio",
+ "settings",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+ "worktree",
+]
+
+[[package]]
 name = "auditable-serde"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -23279,6 +23299,7 @@ dependencies = [
  "askpass",
  "assets",
  "audio",
+ "audio_viewer",
  "auto_update",
  "auto_update_ui",
  "breadcrumbs",

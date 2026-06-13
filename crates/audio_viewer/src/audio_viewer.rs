@@ -16,9 +16,10 @@ use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
     Task, Window, div,
 };
-use language::{DiskState, File as _};
+use language::File as _;
 use project::{Project, ProjectEntryId, ProjectPath};
-use rodio::{Decoder, Source};
+use rodio::{Decoder, DeviceSinkBuilder, Source};
+use settings::Settings;
 use theme_settings::ThemeSettings;
 use ui::{Color, Icon, IconButton, IconName, Label, LabelSize, ProgressBar, Tooltip, prelude::*};
 use util::paths::PathExt;
@@ -285,7 +286,9 @@ impl AudioView {
     fn schedule_progress_updates(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_millis(250)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
                 let keep_playing = this
                     .update(cx, |this, cx| {
                         let Some(duration) = this.audio_item.read(cx).metadata.duration else {
@@ -498,7 +501,7 @@ impl Render for AudioView {
                             .gap_2()
                             .child(
                                 IconButton::new("audio-seek-backward", IconName::ArrowLeft)
-                                    .tooltip(|_, cx| Tooltip::text("Back 5 seconds", cx))
+                                    .tooltip(Tooltip::text("Back 5 seconds"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.seek_backward(window, cx);
                                     })),
@@ -512,23 +515,23 @@ impl Render for AudioView {
                                         IconName::PlayFilled
                                     },
                                 )
-                                .tooltip(|_, cx| {
-                                    Tooltip::text(if is_playing { "Pause" } else { "Play" }, cx)
-                                })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_playback(window, cx);
-                                })),
+                                .tooltip(Tooltip::text(if is_playing { "Pause" } else { "Play" }))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.toggle_playback(window, cx);
+                                    },
+                                )),
                             )
                             .child(
                                 IconButton::new("audio-stop", IconName::Stop)
-                                    .tooltip(|_, cx| Tooltip::text("Stop", cx))
+                                    .tooltip(Tooltip::text("Stop"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.stop_playback(window, cx);
                                     })),
                             )
                             .child(
                                 IconButton::new("audio-seek-forward", IconName::ArrowRight)
-                                    .tooltip(|_, cx| Tooltip::text("Forward 5 seconds", cx))
+                                    .tooltip(Tooltip::text("Forward 5 seconds"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.seek_forward(window, cx);
                                     })),
@@ -639,22 +642,20 @@ fn start_playback(bytes: Arc<Vec<u8>>, offset: Duration) -> Result<PlaybackHandl
                     return;
                 }
             };
-            let source = source
-                .skip_duration(offset)
-                .stoppable()
-                .periodic_access(
-                    Duration::from_millis(50),
-                    move |source: &mut rodio::source::Stoppable<_>| {
-                        if thread_stop_signal.load(Ordering::Relaxed) {
-                            source.stop();
-                        }
-                    },
-                );
+            let source = source.skip_duration(offset).stoppable().periodic_access(
+                Duration::from_millis(50),
+                move |source: &mut rodio::source::Stoppable<_>| {
+                    if thread_stop_signal.load(Ordering::Relaxed) {
+                        source.stop();
+                    }
+                },
+            );
 
-            let Ok(output) = audio::open_test_output(None) else {
+            let Ok(mut output) = DeviceSinkBuilder::open_default_sink() else {
                 log::error!("failed to open audio output device");
                 return;
             };
+            output.log_on_drop(false);
             output.mixer().add(source);
 
             while !playback_stop_signal.load(Ordering::Relaxed) {
