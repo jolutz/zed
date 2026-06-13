@@ -17,6 +17,7 @@ use project::{
     AgentRegistryStore, LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment,
     ProjectPath, ToolchainStore, WorktreeId,
     agent_server_store::AgentServerStore,
+    audio_store::AudioId,
     buffer_store::{BufferStore, BufferStoreEvent},
     context_server_store::ContextServerStore,
     debugger::{breakpoint_store::BreakpointStore, dap_store::DapStore},
@@ -305,6 +306,7 @@ impl HeadlessProject {
         session.add_entity_request_handler(Self::handle_open_server_settings);
         session.add_entity_request_handler(Self::handle_get_directory_environment);
         session.add_entity_message_handler(Self::handle_toggle_lsp_logs);
+        session.add_entity_request_handler(Self::handle_open_audio_by_path);
         session.add_entity_request_handler(Self::handle_open_image_by_path);
         session.add_entity_request_handler(Self::handle_trust_worktrees);
         session.add_entity_request_handler(Self::handle_restrict_worktrees);
@@ -669,6 +671,66 @@ impl HeadlessProject {
 
         Ok(proto::OpenImageResponse {
             image_id: image_id.to_proto(),
+        })
+    }
+
+    pub async fn handle_open_audio_by_path(
+        this: Entity<Self>,
+        message: TypedEnvelope<proto::OpenAudioByPath>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::OpenAudioResponse> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let worktree_id = WorktreeId::from_proto(message.payload.worktree_id);
+        let path = RelPath::from_proto(&message.payload.path)?;
+        let project_id = message.payload.project_id;
+        use proto::create_audio_for_peer::Variant;
+
+        let (worktree_store, session) = this.read_with(&cx, |this, _| {
+            (this.worktree_store.clone(), this.session.clone())
+        });
+
+        let worktree = worktree_store
+            .read_with(&cx, |store, cx| store.worktree_for_id(worktree_id, cx))
+            .context("worktree not found")?;
+
+        let load_task = worktree.update(&mut cx, |worktree, cx| {
+            worktree.load_binary_file(path.as_ref(), cx)
+        });
+
+        let loaded_file = load_task.await?;
+        let content = loaded_file.content;
+        let file = loaded_file.file;
+
+        let proto_file = worktree.read_with(&cx, |_worktree, cx| file.to_proto(cx));
+        let audio_id =
+            AudioId::from(NonZeroU64::new(NEXT_ID.fetch_add(1, Ordering::Relaxed)).unwrap());
+
+        let state = proto::AudioState {
+            id: audio_id.to_proto(),
+            file: Some(proto_file),
+            content_size: content.len() as u64,
+        };
+
+        session.send(proto::CreateAudioForPeer {
+            project_id,
+            peer_id: Some(REMOTE_SERVER_PEER_ID),
+            variant: Some(Variant::State(state)),
+        })?;
+
+        const CHUNK_SIZE: usize = 1024 * 1024;
+        for chunk in content.chunks(CHUNK_SIZE) {
+            session.send(proto::CreateAudioForPeer {
+                project_id,
+                peer_id: Some(REMOTE_SERVER_PEER_ID),
+                variant: Some(Variant::Chunk(proto::AudioChunk {
+                    audio_id: audio_id.to_proto(),
+                    data: chunk.to_vec(),
+                })),
+            })?;
+        }
+
+        Ok(proto::OpenAudioResponse {
+            audio_id: audio_id.to_proto(),
         })
     }
 

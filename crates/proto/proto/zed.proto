@@ -2,6 +2,7 @@ syntax = "proto3";
 package zed.messages;
 
 import "ai.proto";
+import "audio.proto";
 import "app.proto";
 import "buffer.proto";
 import "call.proto";
@@ -505,7 +506,10 @@ message Envelope {
     RefreshDocumentColors refresh_document_colors = 474;
     RefreshDocumentLinks refresh_document_links = 475;
     RefreshFoldingRanges refresh_folding_ranges = 476;
-    RefreshDocumentSymbols refresh_document_symbols = 477; // current max
+    RefreshDocumentSymbols refresh_document_symbols = 477;
+    OpenAudioByPath open_audio_by_path = 478;
+    OpenAudioResponse open_audio_response = 479;
+    CreateAudioForPeer create_audio_for_peer = 480; // current max
   }
 
   reserved 87 to 88;
