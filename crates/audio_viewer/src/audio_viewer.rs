@@ -1,6 +1,6 @@
 use std::{
     io::Cursor,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -17,7 +17,7 @@ use gpui::{
     Task, Window, div,
 };
 use language::File as _;
-use project::{Project, ProjectEntryId, ProjectPath};
+use project::{AudioItem, AudioItemEvent, Project};
 use rodio::{Decoder, DeviceSinkBuilder, Source};
 use settings::Settings;
 use theme_settings::ThemeSettings;
@@ -28,16 +28,8 @@ use workspace::{
     invalid_item_view::InvalidItemView,
     item::{HighlightedText, Item, ProjectItem, TabContentParams},
 };
-use worktree::LoadedBinaryFile;
 
-const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg"];
 const SEEK_STEP: Duration = Duration::from_secs(5);
-
-pub struct AudioItem {
-    file: Arc<worktree::File>,
-    bytes: Arc<Vec<u8>>,
-    metadata: AudioMetadata,
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AudioMetadata {
@@ -45,28 +37,6 @@ pub struct AudioMetadata {
     duration: Option<Duration>,
     channels: Option<u16>,
     sample_rate: Option<u32>,
-}
-
-impl AudioItem {
-    fn new(file: Arc<worktree::File>, bytes: Vec<u8>) -> Self {
-        let metadata = AudioMetadata::from_bytes(&bytes);
-        Self {
-            file,
-            bytes: Arc::new(bytes),
-            metadata,
-        }
-    }
-
-    fn project_path(&self, cx: &App) -> ProjectPath {
-        ProjectPath {
-            worktree_id: self.file.worktree_id(cx),
-            path: self.file.path().clone(),
-        }
-    }
-
-    fn abs_path(&self, cx: &App) -> Option<PathBuf> {
-        Some(self.file.as_local()?.abs_path(cx))
-    }
 }
 
 impl AudioMetadata {
@@ -88,61 +58,6 @@ impl AudioMetadata {
     }
 }
 
-pub fn is_audio_file(project: &Entity<Project>, path: &ProjectPath, cx: &App) -> bool {
-    let extension = util::maybe!({
-        let worktree_abs_path = project
-            .read(cx)
-            .worktree_for_id(path.worktree_id, cx)?
-            .read(cx)
-            .abs_path();
-        path.path
-            .extension()
-            .or_else(|| worktree_abs_path.extension()?.to_str())
-            .map(str::to_lowercase)
-    });
-
-    extension
-        .as_deref()
-        .is_some_and(|extension| AUDIO_EXTENSIONS.contains(&extension))
-}
-
-impl project::ProjectItem for AudioItem {
-    fn try_open(
-        project: &Entity<Project>,
-        path: &ProjectPath,
-        cx: &mut App,
-    ) -> Option<Task<Result<Entity<Self>>>> {
-        if !is_audio_file(project, path, cx) {
-            return None;
-        }
-
-        let project_path = path.clone();
-        let worktree = project
-            .read(cx)
-            .worktree_for_id(project_path.worktree_id, cx)?;
-        let load_file = worktree.update(cx, |worktree, cx| {
-            worktree.load_binary_file(project_path.path.as_ref(), cx)
-        });
-
-        Some(cx.spawn(async move |cx| {
-            let LoadedBinaryFile { file, content } = load_file.await?;
-            Ok(cx.new(|_| AudioItem::new(file, content)))
-        }))
-    }
-
-    fn entry_id(&self, _: &App) -> Option<ProjectEntryId> {
-        self.file.entry_id
-    }
-
-    fn project_path(&self, cx: &App) -> Option<ProjectPath> {
-        Some(self.project_path(cx))
-    }
-
-    fn is_dirty(&self) -> bool {
-        false
-    }
-}
-
 pub enum AudioViewEvent {
     TitleChanged,
 }
@@ -154,6 +69,7 @@ pub struct AudioView {
     project: Entity<Project>,
     focus_handle: FocusHandle,
     playback: PlaybackState,
+    metadata: AudioMetadata,
 }
 
 #[derive(Default)]
@@ -235,16 +151,39 @@ impl AudioView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.subscribe(&audio_item, Self::on_audio_event).detach();
         cx.on_release(|this, _| {
             this.playback.stop();
         })
         .detach();
+        let metadata = AudioMetadata::from_bytes(audio_item.read(cx).bytes.as_ref());
 
         Self {
             audio_item,
             project,
             focus_handle: cx.focus_handle(),
             playback: PlaybackState::default(),
+            metadata,
+        }
+    }
+
+    fn on_audio_event(
+        &mut self,
+        _: Entity<AudioItem>,
+        event: &AudioItemEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            AudioItemEvent::ReloadNeeded | AudioItemEvent::FileHandleChanged => {
+                self.playback.stop();
+                cx.emit(AudioViewEvent::TitleChanged);
+                cx.notify();
+            }
+            AudioItemEvent::Reloaded => {
+                self.playback.stop();
+                self.metadata = AudioMetadata::from_bytes(self.audio_item.read(cx).bytes.as_ref());
+                cx.notify();
+            }
         }
     }
 
@@ -274,7 +213,7 @@ impl AudioView {
 
     fn seek_forward(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let bytes = self.audio_item.read(cx).bytes.clone();
-        let duration = self.audio_item.read(cx).metadata.duration;
+        let duration = self.metadata.duration;
         let mut offset = self.playback.position() + SEEK_STEP;
         if let Some(duration) = duration {
             offset = offset.min(duration);
@@ -291,7 +230,7 @@ impl AudioView {
                     .await;
                 let keep_playing = this
                     .update(cx, |this, cx| {
-                        let Some(duration) = this.audio_item.read(cx).metadata.duration else {
+                        let Some(duration) = this.metadata.duration else {
                             let playing = this.playback.is_playing();
                             if playing {
                                 cx.notify();
@@ -431,6 +370,7 @@ impl Item for AudioView {
             project: self.project.clone(),
             focus_handle: cx.focus_handle(),
             playback: PlaybackState::default(),
+            metadata: self.metadata,
         })))
     }
 
@@ -464,7 +404,7 @@ impl Focusable for AudioView {
 
 impl Render for AudioView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let metadata = self.audio_item.read(cx).metadata;
+        let metadata = self.metadata;
         let position = metadata
             .duration
             .map(|duration| self.playback.position().min(duration))
