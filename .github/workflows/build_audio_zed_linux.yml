@@ -6,6 +6,10 @@ on:
     branches:
       - audio-file-viewer
 
+concurrency:
+  group: build-audio-zed-linux-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
