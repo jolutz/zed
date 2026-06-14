@@ -44,6 +44,9 @@ impl std::error::Error for MissingDependencyError {}
 const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const REMOTE_SERVER_CACHE_LIMIT: usize = 5;
+const AUDIO_ZED_LINUX_RELEASE_TAG: &str = "audio-zed-linux-latest";
+const AUDIO_ZED_LINUX_RELEASE_URL: &str =
+    "https://github.com/jolutz/zed/releases/download/audio-zed-linux-latest";
 
 #[cfg(target_os = "linux")]
 fn linux_rsync_install_hint() -> &'static str {
@@ -529,16 +532,9 @@ impl AutoUpdater {
         })?;
 
         set_status("Fetching remote server release", cx);
-        let release = Self::get_release_asset(
-            &this,
-            release_channel,
-            version,
-            "zed-remote-server",
-            os,
-            arch,
-            cx,
-        )
-        .await?;
+        let release =
+            Self::get_remote_server_release_asset(&this, release_channel, version, os, arch, cx)
+                .await?;
 
         let servers_dir = paths::remote_servers_dir();
         let channel_dir = servers_dir.join(release_channel.dev_name());
@@ -585,10 +581,42 @@ impl AutoUpdater {
         })?;
 
         let release =
-            Self::get_release_asset(&this, channel, version, "zed-remote-server", os, arch, cx)
-                .await?;
+            Self::get_remote_server_release_asset(&this, channel, version, os, arch, cx).await?;
 
         Ok(Some(release.url))
+    }
+
+    async fn get_remote_server_release_asset(
+        this: &Entity<Self>,
+        release_channel: ReleaseChannel,
+        version: Option<Version>,
+        os: &str,
+        arch: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<ReleaseAsset> {
+        if os == "linux" && arch == "x86_64" {
+            let version = cx.update(|cx| {
+                AppCommitSha::try_global(cx)
+                    .map(|sha| sha.full())
+                    .unwrap_or_else(|| AUDIO_ZED_LINUX_RELEASE_TAG.to_string())
+            });
+
+            return Ok(ReleaseAsset {
+                version,
+                url: format!("{AUDIO_ZED_LINUX_RELEASE_URL}/zed-remote-server-linux-x86_64.gz"),
+            });
+        }
+
+        Self::get_release_asset(
+            this,
+            release_channel,
+            version,
+            "zed-remote-server",
+            os,
+            arch,
+            cx,
+        )
+        .await
     }
 
     async fn get_release_asset(

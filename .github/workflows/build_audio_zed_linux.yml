@@ -6,6 +6,10 @@ on:
     branches:
       - audio-file-viewer
 
+concurrency:
+  group: build-audio-zed-linux-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -33,17 +37,16 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Check audio viewer
-        run: cargo check -p audio_viewer
-
       - name: Build Linux bundle
         run: ./script/bundle-linux
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: zed-linux-x86_64.tar.gz
-          path: target/release/zed-linux-x86_64.tar.gz
+          name: audio-zed-linux-x86_64
+          path: |
+            target/release/zed-linux-x86_64.tar.gz
+            target/zed-remote-server-linux-x86_64.gz
           if-no-files-found: error
 
       - name: Publish latest custom build
@@ -52,7 +55,8 @@ jobs:
         run: |
           set -euo pipefail
           release_tag="audio-zed-linux-latest"
-          asset="target/release/zed-linux-x86_64.tar.gz"
+          app_asset="target/release/zed-linux-x86_64.tar.gz"
+          remote_server_asset="target/zed-remote-server-linux-x86_64.gz"
 
           if ! gh release view "$release_tag" >/dev/null 2>&1; then
             gh release create "$release_tag" \
@@ -62,4 +66,7 @@ jobs:
               --prerelease
           fi
 
-          gh release upload "$release_tag" "$asset" --clobber
+          gh release upload "$release_tag" \
+            "$app_asset" \
+            "$remote_server_asset" \
+            --clobber
