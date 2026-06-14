@@ -702,8 +702,10 @@ impl HeadlessProject {
         let file = loaded_file.file;
 
         let proto_file = worktree.read_with(&cx, |_worktree, cx| file.to_proto(cx));
-        let audio_id =
-            AudioId::from(NonZeroU64::new(NEXT_ID.fetch_add(1, Ordering::Relaxed)).unwrap());
+        let audio_id = AudioId::from(
+            NonZeroU64::new(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+                .context("invalid remote audio id")?,
+        );
 
         let state = proto::AudioState {
             id: audio_id.to_proto(),
