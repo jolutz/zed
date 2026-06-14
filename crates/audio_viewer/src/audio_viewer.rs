@@ -279,7 +279,7 @@ impl AudioView {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(250))
+                    .timer(Duration::from_millis(33))
                     .await;
                 let keep_playing = this
                     .update(cx, |this, cx| {
@@ -522,19 +522,6 @@ impl Render for AudioView {
                                             .size(IconSize::XLarge)
                                             .color(Color::Info),
                                     ),
-                            )
-                            .child(
-                                h_flex()
-                                    .h(px(34.))
-                                    .items_end()
-                                    .justify_center()
-                                    .gap_1()
-                                    .child(waveform_bar(px(12.), progress > 0.10, cx))
-                                    .child(waveform_bar(px(24.), progress > 0.25, cx))
-                                    .child(waveform_bar(px(32.), progress > 0.40, cx))
-                                    .child(waveform_bar(px(20.), progress > 0.55, cx))
-                                    .child(waveform_bar(px(28.), progress > 0.70, cx))
-                                    .child(waveform_bar(px(16.), progress > 0.85, cx)),
                             ),
                     )
                     .child(
@@ -795,14 +782,6 @@ impl ProjectItem for AudioView {
     {
         Some(InvalidItemView::new(abs_path, is_local, error, window, cx))
     }
-}
-
-fn waveform_bar(height: Pixels, active: bool, cx: &App) -> impl IntoElement {
-    div().w(px(5.)).h(height).rounded_full().bg(if active {
-        cx.theme().status().info
-    } else {
-        cx.theme().colors().border_variant
-    })
 }
 
 fn metadata_chip(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
