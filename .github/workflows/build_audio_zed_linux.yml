@@ -12,6 +12,7 @@ permissions:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  CXXFLAGS: -fpermissive
   RUST_BACKTRACE: '1'
 
 jobs:
