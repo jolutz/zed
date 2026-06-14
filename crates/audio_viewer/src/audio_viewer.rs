@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     io::Cursor,
     path::Path,
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -13,15 +15,19 @@ use anyhow::Result;
 use editor::{EditorSettings, items::entry_git_aware_label_color};
 use file_icons::FileIcons;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
-    Task, Window, div,
+    AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Render, SharedString, Task, Window, canvas, div, fill,
+    point, size,
 };
 use language::File as _;
 use project::{AudioItem, AudioItemEvent, Project};
 use rodio::{Decoder, DeviceSinkBuilder, Source};
 use settings::Settings;
 use theme_settings::ThemeSettings;
-use ui::{Color, Icon, IconButton, IconName, Label, LabelSize, ProgressBar, Tooltip, prelude::*};
+use ui::{
+    ButtonStyle, Color, Icon, IconButton, IconButtonShape, IconName, IconSize, Label, LabelSize,
+    TintColor, Tooltip, prelude::*,
+};
 use util::paths::PathExt;
 use workspace::{
     ItemSettings, Pane, ToolbarItemLocation, WorkspaceId,
@@ -222,6 +228,53 @@ impl AudioView {
         cx.notify();
     }
 
+    fn seek_to_position(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(duration) = self.metadata.duration else {
+            return;
+        };
+        let fraction = ((position.x - bounds.left()) / bounds.size.width).clamp(0., 1.);
+        let offset = duration.mul_f32(fraction);
+        let bytes = self.audio_item.read(cx).bytes.clone();
+        self.playback.seek_to(offset, bytes, cx);
+        cx.notify();
+    }
+
+    fn seek_bar_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        bounds: &Rc<RefCell<Option<Bounds<Pixels>>>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = *bounds.borrow() else {
+            return;
+        };
+        self.seek_to_position(event.position, bounds, cx);
+        cx.stop_propagation();
+    }
+
+    fn seek_bar_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        bounds: &Rc<RefCell<Option<Bounds<Pixels>>>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let Some(bounds) = *bounds.borrow() else {
+            return;
+        };
+        self.seek_to_position(event.position, bounds, cx);
+        cx.stop_propagation();
+    }
+
     fn schedule_progress_updates(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -413,8 +466,15 @@ impl Render for AudioView {
             .duration
             .map(|duration| duration.as_secs_f32().max(1.0))
             .unwrap_or(1.0);
+        let progress = (position.as_secs_f32() / max_seconds).clamp(0., 1.);
         let title = self.audio_item.read(cx).file.file_name(cx).to_string();
         let is_playing = self.playback.is_playing();
+        let seek_bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
+        let seek_bounds_for_canvas = seek_bounds.clone();
+        let track_color = cx.theme().colors().border_variant;
+        let played_color = cx.theme().status().info;
+        let knob_color = cx.theme().colors().text;
+        let shadow_color = gpui::black().opacity(0.18);
 
         div()
             .track_focus(&self.focus_handle(cx))
@@ -424,83 +484,285 @@ impl Render for AudioView {
             .flex()
             .items_center()
             .justify_center()
+            .p_8()
             .child(
-                div()
+                h_flex()
                     .id("audio-viewer")
                     .w_full()
-                    .max_w(px(640.))
-                    .p_8()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(Label::new(title).size(LabelSize::Large))
+                    .max_w(px(820.))
+                    .p_5()
+                    .gap_6()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .bg(cx.theme().colors().elevated_surface_background)
                     .child(
-                        div()
-                            .flex()
+                        v_flex()
+                            .w(px(180.))
+                            .h(px(180.))
+                            .flex_none()
                             .items_center()
-                            .gap_2()
+                            .justify_center()
+                            .gap_4()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().colors().border_variant)
+                            .bg(cx.theme().colors().editor_background)
                             .child(
-                                IconButton::new("audio-seek-backward", IconName::ArrowLeft)
-                                    .tooltip(Tooltip::text("Back 5 seconds"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.seek_backward(window, cx);
-                                    })),
+                                div()
+                                    .w(px(72.))
+                                    .h(px(72.))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(cx.theme().status().info.opacity(0.14))
+                                    .child(
+                                        Icon::new(IconName::AudioOn)
+                                            .size(IconSize::XLarge)
+                                            .color(Color::Info),
+                                    ),
                             )
                             .child(
-                                IconButton::new(
-                                    "audio-play-pause",
-                                    if is_playing {
-                                        IconName::DebugPause
-                                    } else {
-                                        IconName::PlayFilled
-                                    },
-                                )
-                                .tooltip(Tooltip::text(if is_playing { "Pause" } else { "Play" }))
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.toggle_playback(window, cx);
-                                    },
-                                )),
-                            )
-                            .child(
-                                IconButton::new("audio-stop", IconName::Stop)
-                                    .tooltip(Tooltip::text("Stop"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.stop_playback(window, cx);
-                                    })),
-                            )
-                            .child(
-                                IconButton::new("audio-seek-forward", IconName::ArrowRight)
-                                    .tooltip(Tooltip::text("Forward 5 seconds"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.seek_forward(window, cx);
-                                    })),
+                                h_flex()
+                                    .h(px(34.))
+                                    .items_end()
+                                    .justify_center()
+                                    .gap_1()
+                                    .child(waveform_bar(px(12.), progress > 0.10, cx))
+                                    .child(waveform_bar(px(24.), progress > 0.25, cx))
+                                    .child(waveform_bar(px(32.), progress > 0.40, cx))
+                                    .child(waveform_bar(px(20.), progress > 0.55, cx))
+                                    .child(waveform_bar(px(28.), progress > 0.70, cx))
+                                    .child(waveform_bar(px(16.), progress > 0.85, cx)),
                             ),
                     )
-                    .child(ProgressBar::new(
-                        "audio-progress",
-                        position.as_secs_f32(),
-                        max_seconds,
-                        cx,
-                    ))
                     .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .text_sm()
-                            .text_color(cx.theme().colors().text_muted)
-                            .child(format_duration(position))
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_4()
                             .child(
-                                metadata
-                                    .duration
-                                    .map(format_duration)
-                                    .unwrap_or_else(|| "Unknown duration".to_string()),
-                            ),
-                    )
-                    .child(metadata_text(metadata))
-                    .when_some(self.playback.error.clone(), |this, error| {
-                        this.child(Label::new(error).color(Color::Error).buffer_font(cx))
-                    }),
+                                v_flex()
+                                    .gap_1()
+                                    .child(Label::new(title).size(LabelSize::Large))
+                                    .child(
+                                        Label::new("Audio file")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("audio-seek-bar")
+                                            .w_full()
+                                            .h_8()
+                                            .cursor_pointer()
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener({
+                                                    let seek_bounds = seek_bounds.clone();
+                                                    move |this, event, window, cx| {
+                                                        this.seek_bar_mouse_down(
+                                                            event,
+                                                            &seek_bounds,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    }
+                                                }),
+                                            )
+                                            .on_mouse_move(cx.listener({
+                                                let seek_bounds = seek_bounds.clone();
+                                                move |this, event, window, cx| {
+                                                    this.seek_bar_mouse_move(
+                                                        event,
+                                                        &seek_bounds,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            }))
+                                            .child(
+                                                canvas(
+                                                    move |bounds, _, _| {
+                                                        *seek_bounds_for_canvas.borrow_mut() =
+                                                            Some(bounds);
+                                                    },
+                                                    move |bounds, _, window, _| {
+                                                        let track_height = px(8.);
+                                                        let center_y =
+                                                            (bounds.top() + bounds.bottom()) / 2.;
+                                                        let track_bounds = Bounds::from_corners(
+                                                            point(
+                                                                bounds.left(),
+                                                                center_y - track_height / 2.,
+                                                            ),
+                                                            point(
+                                                                bounds.right(),
+                                                                center_y + track_height / 2.,
+                                                            ),
+                                                        );
+                                                        let played_width =
+                                                            bounds.size.width * progress;
+                                                        let played_bounds = Bounds::from_corners(
+                                                            track_bounds.origin,
+                                                            point(
+                                                                bounds.left() + played_width,
+                                                                track_bounds.bottom(),
+                                                            ),
+                                                        );
+                                                        let knob_center = point(
+                                                            bounds.left() + played_width,
+                                                            center_y,
+                                                        );
+                                                        let knob_bounds = Bounds::centered_at(
+                                                            knob_center,
+                                                            size(px(18.), px(18.)),
+                                                        );
+
+                                                        let mut track =
+                                                            fill(track_bounds, track_color);
+                                                        track.corner_radii = (4.).into();
+                                                        window.paint_quad(track);
+
+                                                        let mut played =
+                                                            fill(played_bounds, played_color);
+                                                        played.corner_radii = (4.).into();
+                                                        window.paint_quad(played);
+
+                                                        let mut knob_shadow =
+                                                            fill(knob_bounds, shadow_color);
+                                                        knob_shadow.corner_radii = (9.).into();
+                                                        window.paint_quad(knob_shadow);
+
+                                                        let mut knob = fill(
+                                                            Bounds::centered_at(
+                                                                knob_center,
+                                                                size(px(12.), px(12.)),
+                                                            ),
+                                                            knob_color,
+                                                        );
+                                                        knob.corner_radii = (6.).into();
+                                                        window.paint_quad(knob);
+                                                    },
+                                                )
+                                                .size_full(),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .justify_between()
+                                            .text_sm()
+                                            .text_color(cx.theme().colors().text_muted)
+                                            .child(format_duration(position))
+                                            .child(
+                                                metadata
+                                                    .duration
+                                                    .map(format_duration)
+                                                    .unwrap_or_else(|| {
+                                                        "Unknown duration".to_string()
+                                                    }),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_4()
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                IconButton::new(
+                                                    "audio-seek-backward",
+                                                    IconName::ArrowLeft,
+                                                )
+                                                .shape(IconButtonShape::Square)
+                                                .icon_size(IconSize::Small)
+                                                .tooltip(Tooltip::text("Back 5 seconds"))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.seek_backward(window, cx);
+                                                })),
+                                            )
+                                            .child(
+                                                IconButton::new(
+                                                    "audio-play-pause",
+                                                    if is_playing {
+                                                        IconName::DebugPause
+                                                    } else {
+                                                        IconName::PlayFilled
+                                                    },
+                                                )
+                                                .shape(IconButtonShape::Square)
+                                                .icon_size(IconSize::Medium)
+                                                .style(ButtonStyle::Tinted(TintColor::Accent))
+                                                .tooltip(Tooltip::text(if is_playing {
+                                                    "Pause"
+                                                } else {
+                                                    "Play"
+                                                }))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.toggle_playback(window, cx);
+                                                })),
+                                            )
+                                            .child(
+                                                IconButton::new("audio-stop", IconName::Stop)
+                                                    .shape(IconButtonShape::Square)
+                                                    .icon_size(IconSize::Small)
+                                                    .tooltip(Tooltip::text("Stop"))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.stop_playback(window, cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                IconButton::new(
+                                                    "audio-seek-forward",
+                                                    IconName::ArrowRight,
+                                                )
+                                                .shape(IconButtonShape::Square)
+                                                .icon_size(IconSize::Small)
+                                                .tooltip(Tooltip::text("Forward 5 seconds"))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.seek_forward(window, cx);
+                                                })),
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .child(metadata_chip(
+                                                format_file_size(metadata.file_size),
+                                                cx,
+                                            ))
+                                            .when_some(metadata.channels, |this, channels| {
+                                                this.child(metadata_chip(
+                                                    format!("{channels} ch"),
+                                                    cx,
+                                                ))
+                                            })
+                                            .when_some(
+                                                metadata.sample_rate,
+                                                |this, sample_rate| {
+                                                    this.child(metadata_chip(
+                                                        format!("{} kHz", sample_rate / 1000),
+                                                        cx,
+                                                    ))
+                                                },
+                                            ),
+                                    ),
+                            )
+                            .when_some(self.playback.error.clone(), |this, error| {
+                                this.child(Label::new(error).color(Color::Error).buffer_font(cx))
+                            }),
+                    ),
             )
     }
 }
@@ -535,15 +797,27 @@ impl ProjectItem for AudioView {
     }
 }
 
-fn metadata_text(metadata: AudioMetadata) -> String {
-    let mut parts = vec![format_file_size(metadata.file_size)];
-    if let Some(channels) = metadata.channels {
-        parts.push(format!("{channels} channels"));
-    }
-    if let Some(sample_rate) = metadata.sample_rate {
-        parts.push(format!("{sample_rate} Hz"));
-    }
-    parts.join(" | ")
+fn waveform_bar(height: Pixels, active: bool, cx: &App) -> impl IntoElement {
+    div().w(px(5.)).h(height).rounded_full().bg(if active {
+        cx.theme().status().info
+    } else {
+        cx.theme().colors().border_variant
+    })
+}
+
+fn metadata_chip(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .bg(cx.theme().colors().editor_background)
+        .border_1()
+        .border_color(cx.theme().colors().border_variant)
+        .child(
+            Label::new(text.into())
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
 }
 
 fn format_file_size(bytes: u64) -> String {
