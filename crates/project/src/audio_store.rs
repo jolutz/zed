@@ -116,7 +116,9 @@ impl AudioItem {
                 })
                 .log_err();
             }
-            tx.send(()).ok();
+            if tx.send(()).is_err() {
+                log::debug!("Audio reload completion listener was dropped");
+            }
         }));
         Some(rx)
     }
@@ -453,7 +455,10 @@ impl RemoteAudioStore {
                 loading.chunks.push(chunk.data);
 
                 if loading.received_size == loading.state.content_size {
-                    let loading = self.loading_remote_audios_by_id.remove(&audio_id).unwrap();
+                    let loading = self
+                        .loading_remote_audios_by_id
+                        .remove(&audio_id)
+                        .context("audio load disappeared before completion")?;
 
                     let mut content = Vec::with_capacity(loading.received_size as usize);
                     for chunk_data in loading.chunks {
@@ -476,7 +481,9 @@ impl RemoteAudioStore {
 
                     if let Some(listeners) = self.remote_audio_listeners.remove(&audio_id) {
                         for listener in listeners {
-                            listener.send(Ok(entity.clone())).ok();
+                            if listener.send(Ok(entity.clone())).is_err() {
+                                log::debug!("Remote audio listener was dropped");
+                            }
                         }
                     }
 
@@ -534,7 +541,9 @@ impl AudioStoreImpl for Entity<LocalAudioStore> {
                 .filter_map(|audio| audio.update(cx, |audio, cx| audio.reload(cx)))
                 .collect::<Vec<_>>();
             for reload in reloads {
-                reload.await.ok();
+                if let Err(error) = reload.await {
+                    log::debug!("Audio reload listener was dropped: {error}");
+                }
             }
             Ok(())
         })
@@ -654,7 +663,7 @@ impl LocalAudioStore {
                     None
                 }
             })
-            .ok()
+            .log_err()
             .flatten();
         let audio = if let Some(audio) = audio {
             audio
