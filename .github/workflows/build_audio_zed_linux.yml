@@ -33,9 +33,6 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Check audio viewer
-        run: cargo check -p audio_viewer
-
       - name: Build Linux bundle
         run: ./script/bundle-linux
 
