@@ -1,3 +1,9 @@
+# Fork-Specific Context
+
+Before changing fork maintenance, CI, distribution, or the audio viewer, read
+`FORK.md`. Keep detailed fork workflow notes there so these always-read rules
+stay focused.
+
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
