@@ -15,6 +15,7 @@ asset="zed-linux-x86_64.tar.gz"
 download_url="https://github.com/${repo}/releases/download/${release_tag}/${asset}"
 install_dir="${HOME}/.local/share/zed-audio"
 bin_dir="${HOME}/.local/bin"
+applications_dir="${HOME}/.local/share/applications"
 tmp_dir="$(mktemp -d)"
 
 cleanup() {
@@ -22,7 +23,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$install_dir" "$bin_dir"
+mkdir -p "$install_dir" "$bin_dir" "$applications_dir"
 
 echo "Downloading ${download_url}"
 curl --fail --location --output "${tmp_dir}/${asset}" "$download_url"
@@ -30,11 +31,57 @@ curl --fail --location --output "${tmp_dir}/${asset}" "$download_url"
 rm -rf "${install_dir:?}/"*
 tar -xzf "${tmp_dir}/${asset}" -C "$install_dir"
 
+app_dir=""
+for candidate in "${install_dir}/zed.app" "${install_dir}/zed-dev.app"; do
+  if [[ -x "${candidate}/bin/zed" ]]; then
+    app_dir="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$app_dir" ]]; then
+  echo "Could not find zed.app/bin/zed in ${asset}." >&2
+  exit 1
+fi
+
 cat > "${bin_dir}/zed-audio" <<EOF
 #!/usr/bin/env bash
-exec "${install_dir}/zed-dev.app/bin/zed" "\$@"
+exec "${app_dir}/bin/zed" "\$@"
 EOF
 chmod +x "${bin_dir}/zed-audio"
 
+cat > "${applications_dir}/dev.zed.Audio.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Audio Zed
+GenericName=Text Editor
+Comment=Audio-enabled Zed fork.
+TryExec=${bin_dir}/zed-audio
+StartupNotify=true
+Exec=${bin_dir}/zed-audio %U
+Icon=${app_dir}/share/icons/hicolor/1024x1024/apps/zed.png
+Categories=Development;IDE;
+Keywords=audio;audiozed;zed-audio;zed;fork;
+MimeType=text/plain;application/x-zerosize;x-scheme-handler/zed-audio;
+Actions=NewWorkspace;
+
+[Desktop Action NewWorkspace]
+Exec=${bin_dir}/zed-audio --new %U
+Name=Open a new workspace
+EOF
+chmod +r "${applications_dir}/dev.zed.Audio.desktop"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$applications_dir" >/dev/null 2>&1 || true
+fi
+
+if command -v kbuildsycoca6 >/dev/null 2>&1; then
+  kbuildsycoca6 >/dev/null 2>&1 || true
+elif command -v kbuildsycoca5 >/dev/null 2>&1; then
+  kbuildsycoca5 >/dev/null 2>&1 || true
+fi
+
 echo "Installed audio Zed to ${install_dir}"
 echo "Run it with: zed-audio"
+echo "Desktop entry: Audio Zed"
