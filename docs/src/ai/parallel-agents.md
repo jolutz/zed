@@ -1,4 +1,4 @@
----
+﻿---
 title: Parallel Agents - Zed
 description: Run multiple agent threads and Terminal Threads concurrently using the Threads Sidebar, manage them across projects, and isolate work using Git worktrees.
 ---
@@ -9,7 +9,7 @@ Parallel Agents lets you run multiple agent threads and Terminal Threads at once
 
 Open the Threads Sidebar with {#kb multi_workspace::ToggleWorkspaceSidebar}.
 
-Use **Zed > Panel Layout > Agentic** to place the Agent Panel and Threads Sidebar on the left, with the Project Panel, Git Panel, and other panels on the right. Use **Zed > Panel Layout > Classic** to restore the editor-oriented layout. You can still rearrange individual panels by right-clicking any panel icon.
+Use **Panel Layout > Agentic** from the user menu in the title bar (or the {#action workspace::UseAgenticLayout} action) to place the Agent Panel and Threads Sidebar on the left, with the Project Panel, Git Panel, and other panels on the right. Use **Panel Layout > Classic** (or {#action workspace::UseClassicLayout}) to restore the editor-oriented layout. You can still rearrange individual panels by right-clicking any panel icon.
 
 ## Threads Sidebar {#threads-sidebar}
 
@@ -61,7 +61,7 @@ The Threads Sidebar can hold different thread types:
 
 ## Multiple Projects {#multiple-projects}
 
-The Threads Sidebar can hold multiple projects at once. Each project gets its own group with its own threads and conversation history. This mirrors how Zed handles projects in general — see [Windows & Projects](../windows-and-projects.md) for more on how projects open and how to manage them.
+The Threads Sidebar can hold multiple projects at once. Each project gets its own group with its own threads and conversation history. This mirrors how Zed handles projects in general â€” see [Windows & Projects](../windows-and-projects.md) for more on how projects open and how to manage them.
 
 To add another project to the sidebar, click the **Add Project** button (open-folder icon) in the sidebar bottom bar. The popover that opens lists your recent projects and also provides **Add Local Folders** and **Add Remote Folder** buttons at the bottom.
 

@@ -1,8 +1,8 @@
-[package]
+﻿[package]
 description = "The fast, collaborative code editor."
 edition.workspace = true
 name = "zed"
-version = "1.6.3"
+version = "1.7.2"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]

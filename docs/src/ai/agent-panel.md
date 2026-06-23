@@ -1,4 +1,4 @@
----
+﻿---
 title: AI Coding Agent - Zed Agent Panel
 description: Use Zed's AI coding agent to generate, refactor, and debug code with tool calling, checkpoints, and multi-model support.
 ---
@@ -6,9 +6,9 @@ description: Use Zed's AI coding agent to generate, refactor, and debug code wit
 # Agent Panel
 
 The Agent Panel is where you interact with AI agents that can read, write, and run code in your project.
-It's the core of Zed's AI code editing experience — use it for code generation, refactoring, debugging, documentation, and general questions.
+It's the core of Zed's AI code editing experience â€” use it for code generation, refactoring, debugging, documentation, and general questions.
 
-Open it with {#action agent::NewThread} from [the Command Palette](../command-palette.md) or click the ✨ icon in the status bar.
+Open it with {#action agent::NewThread} from [the Command Palette](../command-palette.md) or click the âœ¨ icon in the status bar.
 
 ## Getting Started {#getting-started}
 
@@ -33,17 +33,17 @@ The sections below cover what you can do from here.
 
 By default, the Agent Panel uses Zed's first-party agent.
 
-Start a new thread with {#kb agent::NewThread}, or open the "New Thread…" menu using the agent selector button on the left (in the empty state) or the `+` icon in the top-right of the panel toolbar. You can also open that menu with {#kb agent::ToggleNewThreadMenu}.
+Start a new thread with {#kb agent::NewThread}, or open the "New Threadâ€¦" menu using the agent selector button on the left (in the empty state) or the `+` icon in the top-right of the panel toolbar. You can also open that menu with {#kb agent::ToggleNewThreadMenu}.
 
-From the "New Thread…" menu you can:
+From the "New Threadâ€¦" menu you can:
 
 - Pick **Zed Agent** or any installed [External Agent](./external-agents.md) to start a new thread with that agent.
-- Choose **New From Summary** to start a fresh Zed Agent thread seeded with a summary of the current conversation — useful for compacting long threads as you approach the context window limit.
-- Choose **Terminal** to open a terminal thread directly in the Agent Panel — see [Terminal Threads](#terminal-threads) for details.
+- Choose **New From Summary** to start a fresh Zed Agent thread seeded with a summary of the current conversation â€” useful for compacting long threads as you approach the context window limit.
+- Choose **Terminal** to open a terminal thread directly in the Agent Panel â€” see [Terminal Threads](#terminal-threads) for details.
 
 {#action agent::NewExternalAgentThread} creates a new thread with the specified External Agent id.
 
-You can also start a new thread from the [Threads Sidebar](./parallel-agents.md#threads-sidebar), scoped to a specific project — see [Running Multiple Threads](./parallel-agents.md#running-multiple-threads).
+You can also start a new thread from the [Threads Sidebar](./parallel-agents.md#threads-sidebar), scoped to a specific project â€” see [Running Multiple Threads](./parallel-agents.md#running-multiple-threads).
 
 ### Managing Multiple Threads {#multiple-threads}
 
@@ -131,7 +131,7 @@ The Agent Panel can host Terminal Threads alongside your agent threads. For open
 The agent can search your codebase to find relevant context, but providing it explicitly improves response quality and reduces latency.
 
 Add context by typing `@` in the message editor.
-You can mention files, directories, symbols, previous threads, skills, instruction files, and diagnostics.
+You can mention files, directories, symbols, previous threads, skills, diagnostics, branch diffs, and URLs to fetch.
 
 When you paste multi-line code selections copied from a buffer, Zed automatically formats them as @-mentions with the file context.
 To paste content without this automatic formatting, use {#kb agent::PasteRaw} to paste raw text directly.
@@ -148,16 +148,19 @@ OpenAI GPT-4o and later, Anthropic Claude 3 and later, Google Gemini 1.5 and 2.0
 To add an image, you can either search in your project's folder by @-mentioning it, or drag it from your file system directly into the Agent Panel message editor.
 Copying an image and pasting it is also supported.
 
-## Token Usage {#token-usage}
+## Token Usage and Compaction {#token-usage}
 
 Zed surfaces how many tokens you are consuming for your currently active thread near the profile selector in the panel's message editor.
 
-Once you approach the model's context window, a banner appears above the message editor suggesting to start a new thread with the current one summarized and added as context.
-You can also do this at any time with an ongoing thread via the "Agent Options" menu on the top right, where you'll see a "New from Summary" button, as well as simply @-mentioning a past thread in a new one.
+Zed automatically compacts long Zed Agent threads as they approach the configured token threshold. Compaction summarizes earlier messages and replaces them in the model context with that summary, leaving more room for the next turn. The thread shows a **Context Compacted** entry that you can expand to inspect the summary. You can compact manually by typing `/compact` in the message editor.
+
+If the selected model's context window is too small for automatic compaction (less than 80000 tokens), a banner appears above the message editor as you approach the token limit. Use **Start New Thread** from that banner, or choose **New From Summary** from the New Thread menu (the `+` button on the top right), to continue in a new thread seeded with a summary. You can also @-mention a past thread in a new one.
+
+Configure automatic compaction with `agent.auto_compact`. See [Agent Settings](./agent-settings.md#automatic-compaction) for options.
 
 ## Changing Models {#changing-models}
 
-After you've configured your LLM providers—either via [API access](./use-api-access.md) or through [Zed-hosted models](../account/zed-hosted-models.md)—you can switch between their models by clicking on the model selector on the message editor or by using the {#kb agent::ToggleModelSelector} keybinding.
+After you've configured your LLM providersâ€”either via [API access](./use-api-access.md) or through [Zed-hosted models](../account/zed-hosted-models.md)â€”you can switch between their models by clicking on the model selector on the message editor or by using the {#kb agent::ToggleModelSelector} keybinding.
 
 > The same model can be offered via multiple providers - for example, Claude Sonnet 4.5 is available via Zed Pro, OpenRouter, Anthropic directly, and more.
 > Make sure you've selected the correct model **_provider_** for the model you'd like to use, delineated by the logo to the left of the model in the model selector.

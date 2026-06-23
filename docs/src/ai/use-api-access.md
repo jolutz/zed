@@ -1,4 +1,4 @@
----
+﻿---
 title: Use API Access - Zed
 description: Configure provider API access, API keys, API credits, usage billing, and OpenAI-compatible endpoints for Zed AI features.
 ---
@@ -281,7 +281,7 @@ limits, or a custom endpoint.
 {
   "language_models": {
     "deepseek": {
-      "api_url": "https://api.deepseek.com",
+      "api_url": "https://api.deepseek.com/v1",
       "available_models": [
         {
           "name": "deepseek-v4-flash",

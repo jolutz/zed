@@ -1,4 +1,4 @@
-# Tool Permissions
+﻿# Tool Permissions
 
 Configure which [Agent Panel](./agent-panel.md) tools run automatically and which require your approval.
 For a list of available tools, [see the Tools page](./tools.md).
@@ -43,18 +43,18 @@ The `tool_permissions` setting lets you customize tool permissions by specifying
 
 ## Supported Tools
 
-| Tool               | Input Matched Against        |
-| ------------------ | ---------------------------- |
-| `terminal`         | The shell command string     |
-| `edit_file`        | The file path                |
-| `write_file`       | The file path                |
-| `delete_path`      | The path being deleted       |
-| `move_path`        | Source and destination paths |
-| `copy_path`        | Source and destination paths |
-| `create_directory` | The directory path           |
-| `fetch`            | The URL                      |
-| `search_web`       | The search query             |
-| `skill`            | The skill name               |
+| Tool               | Input Matched Against                            |
+| ------------------ | ------------------------------------------------ |
+| `terminal`         | The shell command string                         |
+| `edit_file`        | The file path                                    |
+| `write_file`       | The file path                                    |
+| `delete_path`      | The path being deleted                           |
+| `move_path`        | Source and destination paths                     |
+| `copy_path`        | Source and destination paths                     |
+| `create_directory` | The directory path                               |
+| `fetch`            | The URL                                          |
+| `search_web`       | The search query                                 |
+| `skill`            | The absolute path to the skill's `SKILL.md` file |
 
 For MCP tools, use the format `mcp:<server>:<tool_name>`.
 For example, a tool called `create_issue` on a server called `github` would be `mcp:github:create_issue`.
@@ -87,7 +87,7 @@ For model-invoked [Skills](./skills.md), use the `skill` tool. A user-invoked `/
 | ---------------- | ------------------------------------------------------------------------------ |
 | `default`        | Fallback when no patterns match: `"confirm"` (default), `"allow"`, or `"deny"` |
 | `always_allow`   | Patterns that auto-approve (unless deny or confirm also matches)               |
-| `always_deny`    | Patterns that block immediately—highest priority, cannot be overridden         |
+| `always_deny`    | Patterns that block immediatelyâ€”highest priority, cannot be overridden         |
 | `always_confirm` | Patterns that always prompt, even when `tool_permissions.default` is `"allow"` |
 
 ### Pattern Syntax
@@ -155,7 +155,7 @@ All supported shells work with tool permission patterns, including sh, bash, zsh
 
 <div class="warning">
 
-Test carefully—a typo in a deny pattern blocks legitimate actions.
+Test carefullyâ€”a typo in a deny pattern blocks legitimate actions.
 You can use the "Test Your Rules" checker, available in each individual tool page, to confirm whether a pattern is correctly falling in the desired condition.
 
 </div>
@@ -165,25 +165,25 @@ You can use the "Test Your Rules" checker, available in each individual tool pag
 Zed includes a small set of hardcoded security rules that **cannot be overridden** by any setting.
 These only apply to the **terminal** tool and block recursive deletion of critical directories:
 
-- `rm -rf /` and `rm -rf /*` — filesystem root
-- `rm -rf ~` and `rm -rf ~/*` — home directory
-- `rm -rf $HOME` / `rm -rf ${HOME}` (and `$HOME/*`) — home directory via environment variable
-- `rm -rf .` and `rm -rf ./*` — current directory
-- `rm -rf ..` and `rm -rf ../*` — parent directory
+- `rm -rf /` and `rm -rf /*` â€” filesystem root
+- `rm -rf ~` and `rm -rf ~/*` â€” home directory
+- `rm -rf $HOME` / `rm -rf ${HOME}` (and `$HOME/*`) â€” home directory via environment variable
+- `rm -rf .` and `rm -rf ./*` â€” current directory
+- `rm -rf ..` and `rm -rf ../*` â€” parent directory
 
 These patterns catch any flag combination (e.g., `-fr`, `-rfv`, `-r -f`, `--recursive --force`) and are case-insensitive.
 They are checked against both the raw command and each parsed sub-command in chained commands (e.g., `ls && rm -rf /`).
 
 There are no other built-in rules.
-The default settings file ({#action zed::OpenDefaultSettings}) includes commented-out examples for protecting `.env` files, secrets directories, and private keys — you can uncomment or adapt these to suit your needs.
+The default settings file ({#action zed::OpenDefaultSettings}) includes commented-out examples for protecting `.env` files, secrets directories, and private keys â€” you can uncomment or adapt these to suit your needs.
 
 ## Permission Request in the UI
 
 When the agent requests permission, you'll see in the thread view a tool card with a menu that includes:
 
-- **Allow once** / **Deny once** — One-time decision
-- **Always for <tool>** — Sets a tool-level default to allow or deny
-- **Always for <pattern>** — Adds an `always_allow` or `always_deny` pattern (when a safe pattern can be extracted)
+- **Allow once** / **Deny once** â€” One-time decision
+- **Always for <tool>** â€” Sets a tool-level default to allow or deny
+- **Always for <pattern>** â€” Adds an `always_allow` or `always_deny` pattern (when a safe pattern can be extracted)
 
 Selecting "Always for <tool>" sets `tools.<tool>.default` to allow or deny.
 When a pattern can be safely extracted, selecting "Always for <pattern>" adds an `always_allow` or `always_deny` rule for that input.
@@ -311,6 +311,8 @@ MCP tools only support the tool-level option.
 
 ### Skills
 
+Patterns for the `skill` tool match against the absolute path to the skill's `SKILL.md` file, not the skill name.
+
 ```json [settings]
 {
   "agent": {
@@ -318,7 +320,7 @@ MCP tools only support the tool-level option.
       "tools": {
         "skill": {
           "default": "confirm",
-          "always_allow": [{ "pattern": "^code-review$" }]
+          "always_allow": [{ "pattern": "/code-review/SKILL\\.md$" }]
         }
       }
     }

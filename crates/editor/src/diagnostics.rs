@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 pub trait DiagnosticRenderer {
     fn render_group(
@@ -192,8 +192,8 @@ impl Editor {
         });
         self.activate_diagnostics(buffer_id, diagnostic, window, cx);
         self.refresh_edit_prediction(
-            false,
             true,
+            false,
             EditPredictionRequestTrigger::DiagnosticNavigation,
             window,
             cx,

@@ -1359,6 +1359,7 @@ fn run_settings_ui_subpage_visual_tests(
             window.dispatch_action(
                 Box::new(OpenSettingsAt {
                     path: "agent".to_string(),
+                    target: None,
                 }),
                 cx,
             );
@@ -1404,6 +1405,7 @@ fn run_settings_ui_subpage_visual_tests(
             window.dispatch_action(
                 Box::new(OpenSettingsAt {
                     path: "edit_predictions.providers".to_string(),
+                    target: None,
                 }),
                 cx,
             );
@@ -2388,6 +2390,7 @@ fn run_tool_permissions_visual_tests(
             window.dispatch_action(
                 Box::new(OpenSettingsAt {
                     path: "agent.tool_permissions".to_string(),
+                    target: None,
                 }),
                 cx,
             );
