@@ -57,11 +57,74 @@ impl AudioMetadata {
 
         Self {
             file_size,
-            duration: decoder.total_duration(),
+            duration: wav_duration_from_bytes(bytes).or_else(|| decoder.total_duration()),
             channels: Some(decoder.channels().get()),
             sample_rate: Some(decoder.sample_rate().get()),
         }
     }
+}
+
+fn wav_duration_from_bytes(bytes: &[u8]) -> Option<Duration> {
+    if bytes.len() < 12 || bytes.get(0..4)? != b"RIFF" || bytes.get(8..12)? != b"WAVE" {
+        return None;
+    }
+
+    let mut byte_rate = None;
+    let mut block_align = None;
+    let mut data_size = None;
+    let mut offset = 12usize;
+
+    while offset.checked_add(8)? <= bytes.len() {
+        let chunk_id = bytes.get(offset..offset + 4)?;
+        let declared_chunk_size =
+            u32::from_le_bytes(bytes.get(offset + 4..offset + 8)?.try_into().ok()?) as usize;
+        let chunk_data_offset = offset.checked_add(8)?;
+        let available_size = bytes.len().saturating_sub(chunk_data_offset);
+        let chunk_size = declared_chunk_size.min(available_size);
+
+        match chunk_id {
+            b"fmt " if chunk_size >= 16 => {
+                let format = u16::from_le_bytes(
+                    bytes
+                        .get(chunk_data_offset..chunk_data_offset + 2)?
+                        .try_into()
+                        .ok()?,
+                );
+                let current_byte_rate = u32::from_le_bytes(
+                    bytes
+                        .get(chunk_data_offset + 8..chunk_data_offset + 12)?
+                        .try_into()
+                        .ok()?,
+                );
+                let current_block_align = u16::from_le_bytes(
+                    bytes
+                        .get(chunk_data_offset + 12..chunk_data_offset + 14)?
+                        .try_into()
+                        .ok()?,
+                );
+
+                if format == 1 && current_byte_rate > 0 && current_block_align > 0 {
+                    byte_rate = Some(current_byte_rate as u64);
+                    block_align = Some(current_block_align as u64);
+                }
+            }
+            b"data" => {
+                data_size = Some(chunk_size as u64);
+                break;
+            }
+            _ => {}
+        }
+
+        offset = chunk_data_offset
+            .checked_add(declared_chunk_size)?
+            .checked_add(declared_chunk_size % 2)?;
+    }
+
+    let byte_rate = byte_rate?;
+    let block_align = block_align?;
+    let data_size = data_size?;
+    let data_size = data_size - data_size % block_align;
+    Some(Duration::from_secs_f64(data_size as f64 / byte_rate as f64))
 }
 
 pub enum AudioViewEvent {
@@ -817,6 +880,36 @@ fn format_duration(duration: Duration) -> String {
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
     format!("{minutes}:{seconds:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn computes_duration_from_available_wav_data_when_sizes_are_maxed() {
+        let sample_rate = 24_000u32;
+        let byte_rate = sample_rate * 2;
+        let block_align = 2u16;
+        let data_bytes = byte_rate as usize;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&u32::MAX.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&u32::MAX.to_le_bytes());
+        wav.resize(wav.len() + data_bytes, 0);
+
+        assert_eq!(wav_duration_from_bytes(&wav), Some(Duration::from_secs(1)));
+    }
 }
 
 fn start_playback(bytes: Arc<Vec<u8>>, offset: Duration) -> Result<PlaybackHandle> {

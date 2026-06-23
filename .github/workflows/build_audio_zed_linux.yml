@@ -64,6 +64,8 @@ jobs:
               --title "Latest audio Zed Linux build" \
               --notes "Latest custom Kubuntu-focused Zed build from the audio-file-viewer branch." \
               --prerelease
+          else
+            gh release edit "$release_tag" --target "$GITHUB_SHA"
           fi
 
           gh release upload "$release_tag" \

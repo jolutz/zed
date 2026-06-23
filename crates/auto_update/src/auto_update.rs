@@ -181,6 +181,11 @@ pub struct ReleaseAsset {
     pub url: String,
 }
 
+#[derive(Deserialize)]
+struct GithubRelease {
+    target_commitish: String,
+}
+
 struct MacOsUnmounter<'a> {
     mount_path: PathBuf,
     background_executor: &'a BackgroundExecutor,
@@ -619,6 +624,26 @@ impl AutoUpdater {
         .await
     }
 
+    async fn get_application_release_asset(
+        this: &Entity<Self>,
+        release_channel: ReleaseChannel,
+        version: Option<Version>,
+        os: &str,
+        arch: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<ReleaseAsset> {
+        if os == "linux" && arch == "x86_64" {
+            let client = this.read_with(cx, |this, _| this.client.http_client());
+            let version = fetch_audio_zed_linux_release_version(client).await?;
+            return Ok(ReleaseAsset {
+                version,
+                url: format!("{AUDIO_ZED_LINUX_RELEASE_URL}/zed-linux-x86_64.tar.gz"),
+            });
+        }
+
+        Self::get_release_asset(this, release_channel, version, "zed", os, arch, cx).await
+    }
+
     async fn get_release_asset(
         this: &Entity<Self>,
         release_channel: ReleaseChannel,
@@ -702,7 +727,7 @@ impl AutoUpdater {
         });
 
         let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
+            Self::get_application_release_asset(&this, release_channel, None, OS, ARCH, cx).await?;
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
         let newer_version = Self::check_if_fetched_version_is_newer(
@@ -793,6 +818,16 @@ impl AutoUpdater {
                     );
                 }
             }
+        }
+
+        if parsed_fetched_version.is_err() {
+            let should_download = app_commit_sha
+                .ok()
+                .flatten()
+                .is_none_or(|sha| sha != fetched_version);
+            return Ok(
+                should_download.then(|| VersionCheckType::Sha(AppCommitSha::new(fetched_version)))
+            );
         }
 
         match release_channel {
@@ -905,6 +940,30 @@ impl AutoUpdater {
             Ok(kvp.read_kvp(SHOULD_SHOW_UPDATE_NOTIFICATION_KEY)?.is_some())
         })
     }
+}
+
+async fn fetch_audio_zed_linux_release_version(client: Arc<HttpClientWithUrl>) -> Result<String> {
+    let url = format!(
+        "https://api.github.com/repos/jolutz/zed/releases/tags/{AUDIO_ZED_LINUX_RELEASE_TAG}"
+    );
+    let mut response = client.get(&url, Default::default(), true).await?;
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
+
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to fetch audio Zed release: {:?}",
+        String::from_utf8_lossy(&body),
+    );
+
+    let release: GithubRelease = serde_json::from_slice(body.as_slice()).with_context(|| {
+        format!(
+            "error deserializing audio Zed release {:?}",
+            String::from_utf8_lossy(&body),
+        )
+    })?;
+
+    Ok(release.target_commitish)
 }
 
 async fn download_remote_server_binary(
