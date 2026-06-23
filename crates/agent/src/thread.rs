@@ -1550,18 +1550,6 @@ impl Thread {
             )
     }
 
-    /// A canceled tool result carries only the model-facing `TOOL_CANCELED_MESSAGE`
-    /// sentinel (inserted exactly when a tool had no real result). It's never
-    /// meaningful to the user, so we detect it to skip replaying the tool call.
-    fn is_canceled_tool_result(tool_result: &LanguageModelToolResult) -> bool {
-        tool_result.is_error
-            && matches!(
-                tool_result.content.as_slice(),
-                [LanguageModelToolResultContent::Text(text)]
-                    if text.as_ref() == TOOL_CANCELED_MESSAGE
-            )
-    }
-
     fn tool_result_content_for_replay(
         tool_result: &LanguageModelToolResult,
     ) -> Option<Vec<acp::ToolCallContent>> {
