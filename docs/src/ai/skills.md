@@ -196,7 +196,7 @@ Zed Skills apply to the Zed Agent. External Agents and Terminal Threads may have
 
 - **Flat layout only.** Skills must be direct children of the skills root. Nested folders like `~/.agents/skills/group/my-skill/` are not discovered.
 - **50KB catalog budget.** The total size of all skill names and descriptions is capped at 50KB. Skills that don't fit are dropped from the catalog with a warning in the UI. Keep descriptions concise.
-- **No remote registry.** Zed does not discover or load skills from remote locations at runtime, and custom search paths are not supported. (You can still import a skill once from a GitHub URL â€” see [Create your own](#create-your-own).) Skills are loaded from `~/.agents/skills/` and `<worktree>/.agents/skills/` only. Use a symlink if you need to point at another location.
+- **No remote registry.** Zed does not discover or load skills from remote locations at runtime, and custom search paths are not supported. (You can still import a skill once from a GitHub URL — see [Create your own](#create-your-own).) Skills are loaded from `~/.agents/skills/` and `<worktree>/.agents/skills/` only. Use a symlink if you need to point at another location.
 - **Live reload.** Adding, removing, or editing a `SKILL.md` takes effect immediately without restarting your session. Changes to a skill's `name` or `description` invalidate the model's prompt cache for the current session.
 
 ## See also

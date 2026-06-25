@@ -490,9 +490,11 @@ message Envelope {
     GetDocumentLinksResponse get_document_links_response = 454;
     ResolveDocumentLink resolve_document_link = 455;
     ResolveDocumentLinkResponse resolve_document_link_response = 456;
-    OpenAudioByPath open_audio_by_path = 457;
-    OpenAudioResponse open_audio_response = 458;
-    CreateAudioForPeer create_audio_for_peer = 459; // current max
+    GitWorktreeCreatedAt git_worktree_created_at = 457;
+    GitWorktreeCreatedAtResponse git_worktree_created_at_response = 458;
+    OpenAudioByPath open_audio_by_path = 459;
+    OpenAudioResponse open_audio_response = 460;
+    CreateAudioForPeer create_audio_for_peer = 461; // current max
   }
 
   reserved 87 to 88;
