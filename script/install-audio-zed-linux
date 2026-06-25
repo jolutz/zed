@@ -25,6 +25,11 @@ trap cleanup EXIT
 
 mkdir -p "$install_dir" "$bin_dir" "$applications_dir"
 
+official_desktop_entry="${applications_dir}/dev.zed.Zed.desktop"
+if [[ -f "$official_desktop_entry" ]]; then
+  sed -i '0,/^Name=Zed$/s//Name=Zed Official/' "$official_desktop_entry"
+fi
+
 echo "Downloading ${download_url}"
 curl --fail --location --output "${tmp_dir}/${asset}" "$download_url"
 
@@ -54,7 +59,7 @@ cat > "${applications_dir}/dev.zed.Audio.desktop" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Audio Zed
+Name=Zed
 GenericName=Text Editor
 Comment=Audio-enabled Zed fork.
 TryExec=${bin_dir}/zed-audio
@@ -84,4 +89,4 @@ fi
 
 echo "Installed audio Zed to ${install_dir}"
 echo "Run it with: zed-audio"
-echo "Desktop entry: Audio Zed"
+echo "Desktop entry: Zed"
