@@ -492,9 +492,10 @@ message Envelope {
     ResolveDocumentLinkResponse resolve_document_link_response = 456;
     GitWorktreeCreatedAt git_worktree_created_at = 457;
     GitWorktreeCreatedAtResponse git_worktree_created_at_response = 458;
-    OpenAudioByPath open_audio_by_path = 459;
-    OpenAudioResponse open_audio_response = 460;
-    CreateAudioForPeer create_audio_for_peer = 461; // current max
+    TelemetryEvent telemetry_event = 459;
+    OpenAudioByPath open_audio_by_path = 460;
+    OpenAudioResponse open_audio_response = 461;
+    CreateAudioForPeer create_audio_for_peer = 462; // current max
   }
 
   reserved 87 to 88;
