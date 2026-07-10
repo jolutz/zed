@@ -1,27 +1,18 @@
-use std::{
-    cell::RefCell,
-    io::Cursor,
-    path::Path,
-    rc::Rc,
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
-    },
-    thread,
-    time::Duration,
-};
+mod playback;
+
+use std::{cell::RefCell, io::Cursor, path::Path, rc::Rc, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result};
 use editor::{EditorSettings, items::entry_git_aware_label_color};
 use file_icons::FileIcons;
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Task, Window,
-    actions, canvas, div, fill, point, size,
+    MouseDownEvent, MouseMoveEvent, Pixels, Render, SharedString, Task, Window, actions, canvas,
+    div, fill, point, size,
 };
 use language::File as _;
 use project::{AudioItem, AudioItemEvent, Project};
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use rodio::{Decoder, Source};
 use settings::Settings;
 use theme_settings::ThemeSettings;
 use ui::{
@@ -35,9 +26,10 @@ use workspace::{
     item::{HighlightedText, Item, ProjectItem, TabContentParams},
 };
 
+use self::playback::PlaybackState;
+
 const SEEK_STEP: Duration = Duration::from_secs(5);
 const WAVEFORM_PEAK_COUNT: usize = 1_536;
-const PLAYBACK_UPDATE_INTERVAL: Duration = Duration::from_millis(33);
 
 actions!(
     audio_viewer,
@@ -263,380 +255,6 @@ pub struct AudioView {
     scrub_position: Option<Duration>,
     hover_position: Option<Duration>,
     seek_bar_hovered: bool,
-    progress_updates_running: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum PlaybackStatus {
-    #[default]
-    Idle,
-    Starting,
-    Playing,
-    Paused,
-    Finished,
-    Failed,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct PlaybackSnapshot {
-    status: PlaybackStatus,
-    position: Duration,
-    error: Option<String>,
-}
-
-#[derive(Default)]
-struct SharedPlaybackSnapshot(Mutex<PlaybackSnapshot>);
-
-impl SharedPlaybackSnapshot {
-    fn read(&self) -> PlaybackSnapshot {
-        match self.0.lock() {
-            Ok(snapshot) => snapshot.clone(),
-            Err(poisoned) => {
-                log::error!("audio playback state lock was poisoned");
-                poisoned.into_inner().clone()
-            }
-        }
-    }
-
-    fn update(&self, update: impl FnOnce(&mut PlaybackSnapshot)) {
-        match self.0.lock() {
-            Ok(mut snapshot) => update(&mut snapshot),
-            Err(poisoned) => {
-                log::error!("audio playback state lock was poisoned");
-                update(&mut poisoned.into_inner());
-            }
-        }
-    }
-}
-
-enum PlaybackCommand {
-    LoadAndPlay {
-        bytes: Arc<Vec<u8>>,
-        format_hint: Option<String>,
-        offset: Duration,
-    },
-    Pause,
-    Resume,
-    Seek(Duration),
-    Stop,
-    Shutdown,
-}
-
-struct PlaybackController {
-    command_sender: Sender<PlaybackCommand>,
-    snapshot: Arc<SharedPlaybackSnapshot>,
-    _thread: thread::JoinHandle<()>,
-}
-
-impl PlaybackController {
-    fn new() -> Result<Self> {
-        let (command_sender, command_receiver) = mpsc::channel();
-        let snapshot = Arc::new(SharedPlaybackSnapshot::default());
-        let thread_snapshot = snapshot.clone();
-        let thread = thread::Builder::new()
-            .name("AudioFileViewerPlayback".to_string())
-            .spawn(move || playback_thread(command_receiver, thread_snapshot))
-            .context("Could not start the audio playback thread")?;
-
-        Ok(Self {
-            command_sender,
-            snapshot,
-            _thread: thread,
-        })
-    }
-
-    fn send(&self, command: PlaybackCommand) -> Result<()> {
-        self.command_sender
-            .send(command)
-            .context("The audio playback thread stopped unexpectedly")
-    }
-
-    fn snapshot(&self) -> PlaybackSnapshot {
-        self.snapshot.read()
-    }
-}
-
-impl Drop for PlaybackController {
-    fn drop(&mut self) {
-        if self.command_sender.send(PlaybackCommand::Shutdown).is_err() {
-            log::debug!("audio playback thread had already stopped");
-        }
-    }
-}
-
-struct PlaybackSession {
-    _output: MixerDeviceSink,
-    player: Player,
-}
-
-fn playback_thread(
-    command_receiver: Receiver<PlaybackCommand>,
-    snapshot: Arc<SharedPlaybackSnapshot>,
-) {
-    let mut session: Option<PlaybackSession> = None;
-
-    loop {
-        let command = match command_receiver.recv_timeout(PLAYBACK_UPDATE_INTERVAL) {
-            Ok(command) => Some(command),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => break,
-        };
-
-        if let Some(command) = command
-            && handle_playback_command(command, &mut session, &snapshot)
-        {
-            break;
-        }
-        while let Ok(command) = command_receiver.try_recv() {
-            if handle_playback_command(command, &mut session, &snapshot) {
-                return;
-            }
-        }
-
-        let Some(current_session) = session.as_ref() else {
-            continue;
-        };
-        if snapshot.read().status == PlaybackStatus::Failed {
-            session = None;
-            continue;
-        }
-
-        let position = current_session.player.get_pos();
-        if current_session.player.empty() {
-            snapshot.update(|snapshot| {
-                snapshot.status = PlaybackStatus::Finished;
-                snapshot.position = position;
-            });
-            session = None;
-        } else if !current_session.player.is_paused() {
-            snapshot.update(|snapshot| {
-                snapshot.status = PlaybackStatus::Playing;
-                snapshot.position = position;
-            });
-        }
-    }
-}
-
-fn handle_playback_command(
-    command: PlaybackCommand,
-    session: &mut Option<PlaybackSession>,
-    snapshot: &Arc<SharedPlaybackSnapshot>,
-) -> bool {
-    match command {
-        PlaybackCommand::LoadAndPlay {
-            bytes,
-            format_hint,
-            offset,
-        } => {
-            snapshot.update(|snapshot| {
-                snapshot.status = PlaybackStatus::Starting;
-                snapshot.position = offset;
-                snapshot.error = None;
-            });
-            match start_playback_session(bytes, format_hint.as_deref(), offset, snapshot.clone()) {
-                Ok(new_session) => {
-                    *session = Some(new_session);
-                    snapshot.update(|snapshot| snapshot.status = PlaybackStatus::Playing);
-                }
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    log::error!("failed to play audio file: {error:?}");
-                    snapshot.update(|snapshot| {
-                        snapshot.status = PlaybackStatus::Failed;
-                        snapshot.error = Some(message);
-                    });
-                    *session = None;
-                }
-            }
-        }
-        PlaybackCommand::Pause => {
-            if let Some(session) = session {
-                session.player.pause();
-                let position = session.player.get_pos();
-                snapshot.update(|snapshot| {
-                    snapshot.status = PlaybackStatus::Paused;
-                    snapshot.position = position;
-                });
-            }
-        }
-        PlaybackCommand::Resume => {
-            if let Some(session) = session {
-                session.player.play();
-                snapshot.update(|snapshot| {
-                    snapshot.status = PlaybackStatus::Playing;
-                    snapshot.error = None;
-                });
-            }
-        }
-        PlaybackCommand::Seek(position) => {
-            if let Some(session) = session {
-                match session.player.try_seek(position) {
-                    Ok(()) => snapshot.update(|snapshot| {
-                        snapshot.position = position;
-                        snapshot.error = None;
-                    }),
-                    Err(error) => {
-                        log::error!("failed to seek audio file: {error:?}");
-                        snapshot.update(|snapshot| {
-                            snapshot.error =
-                                Some(format!("Could not seek in the audio file: {error}"));
-                        });
-                    }
-                }
-            }
-        }
-        PlaybackCommand::Stop => {
-            *session = None;
-            snapshot.update(|snapshot| *snapshot = PlaybackSnapshot::default());
-        }
-        PlaybackCommand::Shutdown => return true,
-    }
-    false
-}
-
-fn start_playback_session(
-    bytes: Arc<Vec<u8>>,
-    format_hint: Option<&str>,
-    offset: Duration,
-    snapshot: Arc<SharedPlaybackSnapshot>,
-) -> Result<PlaybackSession> {
-    let decoder = decode_audio(bytes, format_hint)?;
-    let error_snapshot = snapshot;
-    let mut output = DeviceSinkBuilder::from_default_device()
-        .context("No audio output device is available")?
-        .with_error_callback(move |error| {
-            log::error!("audio output stream failed: {error:?}");
-            error_snapshot.update(|snapshot| {
-                snapshot.status = PlaybackStatus::Failed;
-                snapshot.error = Some(format!("The audio output device failed: {error}"));
-            });
-        })
-        .open_sink_or_fallback()
-        .context("Could not open the audio output device")?;
-    output.log_on_drop(false);
-    let player = Player::connect_new(output.mixer());
-    player.append(decoder);
-    if !offset.is_zero() {
-        player
-            .try_seek(offset)
-            .context("Could not seek to the playback position")?;
-    }
-
-    Ok(PlaybackSession {
-        _output: output,
-        player,
-    })
-}
-
-#[derive(Default)]
-struct PlaybackState {
-    controller: Option<PlaybackController>,
-    status: PlaybackStatus,
-    position: Duration,
-    error: Option<String>,
-}
-
-impl PlaybackState {
-    fn position(&self) -> Duration {
-        self.position
-    }
-
-    fn is_playing(&self) -> bool {
-        matches!(
-            self.status,
-            PlaybackStatus::Starting | PlaybackStatus::Playing
-        )
-    }
-
-    fn is_paused(&self) -> bool {
-        self.status == PlaybackStatus::Paused
-    }
-
-    fn synchronize(&mut self) {
-        let Some(controller) = &self.controller else {
-            return;
-        };
-        let snapshot = controller.snapshot();
-        self.status = snapshot.status;
-        self.position = snapshot.position;
-        self.error = snapshot.error;
-    }
-
-    fn send(&mut self, command: PlaybackCommand) -> bool {
-        let Some(controller) = &self.controller else {
-            return false;
-        };
-        if let Err(error) = controller.send(command) {
-            log::error!("failed to control audio playback: {error:?}");
-            self.status = PlaybackStatus::Failed;
-            self.error = Some(error.to_string());
-            false
-        } else {
-            true
-        }
-    }
-
-    fn stop(&mut self) {
-        self.send(PlaybackCommand::Stop);
-        self.status = PlaybackStatus::Idle;
-        self.position = Duration::ZERO;
-        self.error = None;
-    }
-
-    fn pause(&mut self) {
-        if self.send(PlaybackCommand::Pause) {
-            self.status = PlaybackStatus::Paused;
-        }
-    }
-
-    fn seek_to(&mut self, offset: Duration) {
-        self.position = offset;
-        if matches!(
-            self.status,
-            PlaybackStatus::Starting | PlaybackStatus::Playing | PlaybackStatus::Paused
-        ) {
-            self.send(PlaybackCommand::Seek(offset));
-        }
-    }
-
-    fn play(&mut self, bytes: Arc<Vec<u8>>, format_hint: Option<String>) {
-        if self.is_playing() {
-            return;
-        }
-
-        if self.is_paused() {
-            if self.send(PlaybackCommand::Resume) {
-                self.status = PlaybackStatus::Playing;
-                self.error = None;
-            }
-            return;
-        }
-
-        if self.status == PlaybackStatus::Finished {
-            self.position = Duration::ZERO;
-        }
-        if self.controller.is_none() {
-            match PlaybackController::new() {
-                Ok(controller) => self.controller = Some(controller),
-                Err(error) => {
-                    log::error!("failed to initialize audio playback: {error:?}");
-                    self.status = PlaybackStatus::Failed;
-                    self.error = Some(error.to_string());
-                    return;
-                }
-            }
-        }
-
-        let command = PlaybackCommand::LoadAndPlay {
-            bytes,
-            format_hint,
-            offset: self.position,
-        };
-        if self.send(command) {
-            self.status = PlaybackStatus::Starting;
-            self.error = None;
-        }
-    }
 }
 
 impl AudioView {
@@ -673,7 +291,6 @@ impl AudioView {
             scrub_position: None,
             hover_position: None,
             seek_bar_hovered: false,
-            progress_updates_running: false,
         }
     }
 
@@ -752,7 +369,6 @@ impl AudioView {
         } else {
             let bytes = self.audio_item.read(cx).bytes.clone();
             self.playback.play(bytes, self.format_hint(cx));
-            self.schedule_progress_updates(cx);
         }
         cx.notify();
     }
@@ -772,7 +388,7 @@ impl AudioView {
     fn seek_forward(&mut self, _: &SeekForward, _window: &mut Window, cx: &mut Context<Self>) {
         self.playback.synchronize();
         let duration = self.metadata.duration;
-        let mut offset = self.playback.position() + SEEK_STEP;
+        let mut offset = self.playback.position().saturating_add(SEEK_STEP);
         if let Some(duration) = duration {
             offset = offset.min(duration);
         }
@@ -829,24 +445,12 @@ impl AudioView {
         cx.stop_propagation();
     }
 
-    fn seek_bar_mouse_up(
-        &mut self,
-        event: &MouseUpEvent,
-        bounds: &Rc<RefCell<Option<Bounds<Pixels>>>>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let position = self.scrub_position.or_else(|| {
-            bounds
-                .borrow()
-                .as_ref()
-                .and_then(|bounds| self.seek_position(event.position, *bounds))
-        });
-        if let Some(position) = position {
-            self.playback.seek_to(position);
-        }
-        self.scrub_position = None;
-        self.hover_position = position;
+    fn seek_bar_mouse_up(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(position) = self.scrub_position.take() else {
+            return;
+        };
+        self.playback.seek_to(position);
+        self.hover_position = Some(position);
         cx.notify();
         cx.stop_propagation();
     }
@@ -857,58 +461,6 @@ impl AudioView {
             self.hover_position = None;
         }
         cx.notify();
-    }
-
-    fn schedule_progress_updates(&mut self, cx: &mut Context<Self>) {
-        if self.progress_updates_running {
-            return;
-        }
-        self.progress_updates_running = true;
-        cx.spawn(async move |this, cx| {
-            let mut update_interval = PLAYBACK_UPDATE_INTERVAL;
-            loop {
-                cx.background_executor().timer(update_interval).await;
-                let (keep_updating, playing) = this
-                    .update(cx, |this, cx| {
-                        let previous_snapshot = PlaybackSnapshot {
-                            status: this.playback.status,
-                            position: this.playback.position,
-                            error: this.playback.error.clone(),
-                        };
-                        this.playback.synchronize();
-                        let playing = this.playback.is_playing();
-                        let keep_updating = matches!(
-                            this.playback.status,
-                            PlaybackStatus::Starting
-                                | PlaybackStatus::Playing
-                                | PlaybackStatus::Paused
-                        );
-                        let current_snapshot = PlaybackSnapshot {
-                            status: this.playback.status,
-                            position: this.playback.position,
-                            error: this.playback.error.clone(),
-                        };
-                        if playing || current_snapshot != previous_snapshot {
-                            cx.notify();
-                        }
-                        if !keep_updating {
-                            this.progress_updates_running = false;
-                        }
-                        (keep_updating, playing)
-                    })
-                    .unwrap_or((false, false));
-
-                if !keep_updating {
-                    break;
-                }
-                update_interval = if playing {
-                    PLAYBACK_UPDATE_INTERVAL
-                } else {
-                    Duration::from_millis(250)
-                };
-            }
-        })
-        .detach();
     }
 }
 
@@ -1054,19 +606,27 @@ impl Focusable for AudioView {
 impl Render for AudioView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.playback.synchronize();
+        if self.playback.is_playing() {
+            window.request_animation_frame();
+        }
         let metadata = self.metadata;
-        let playback_position = self
-            .scrub_position
-            .unwrap_or_else(|| self.playback.position());
+        let playback_position = self.scrub_position.unwrap_or_else(|| {
+            if self.playback.is_finished() {
+                metadata
+                    .duration
+                    .unwrap_or_else(|| self.playback.position())
+            } else {
+                self.playback.position()
+            }
+        });
         let position = metadata
             .duration
             .map(|duration| playback_position.min(duration))
             .unwrap_or(playback_position);
-        let max_seconds = metadata
+        let progress = metadata
             .duration
-            .map(|duration| duration.as_secs_f32().max(1.0))
-            .unwrap_or(1.0);
-        let progress = (position.as_secs_f32() / max_seconds).clamp(0., 1.);
+            .map(|duration| playback_progress(position, duration))
+            .unwrap_or(0.0);
         let title = self.audio_item.read(cx).file.file_name(cx).to_string();
         let format_label = self
             .format_hint(cx)
@@ -1084,10 +644,9 @@ impl Render for AudioView {
             || self.scrub_position.is_some()
             || self.focus_handle.is_focused(window);
         let hover_progress = self.hover_position.and_then(|hover_position| {
-            metadata.duration.map(|duration| {
-                (hover_position.as_secs_f32() / duration.as_secs_f32().max(f32::EPSILON))
-                    .clamp(0.0, 1.0)
-            })
+            metadata
+                .duration
+                .map(|duration| playback_progress(hover_position, duration))
         });
         let analysis_loading = self.waveform_peaks.is_none() && self.analysis_error.is_none();
 
@@ -1183,30 +742,14 @@ impl Render for AudioView {
                                             )
                                             .on_mouse_up(
                                                 MouseButton::Left,
-                                                cx.listener({
-                                                    let seek_bounds = seek_bounds.clone();
-                                                    move |this, event, window, cx| {
-                                                        this.seek_bar_mouse_up(
-                                                            event,
-                                                            &seek_bounds,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    }
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.seek_bar_mouse_up(window, cx);
                                                 }),
                                             )
                                             .on_mouse_up_out(
                                                 MouseButton::Left,
-                                                cx.listener({
-                                                    let seek_bounds = seek_bounds.clone();
-                                                    move |this, event, window, cx| {
-                                                        this.seek_bar_mouse_up(
-                                                            event,
-                                                            &seek_bounds,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    }
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.seek_bar_mouse_up(window, cx);
                                                 }),
                                             )
                                             .on_mouse_move(cx.listener({
@@ -1341,7 +884,7 @@ impl Render for AudioView {
                                 IconButton::new("audio-reset", IconName::RotateCcw)
                                     .shape(IconButtonShape::Square)
                                     .icon_size(IconSize::Small)
-                                    .disabled(!can_seek || position.is_zero())
+                                    .disabled(!can_seek)
                                     .aria_label("Return to beginning")
                                     .tooltip(|_window, cx| {
                                         Tooltip::for_action(
@@ -1355,7 +898,7 @@ impl Render for AudioView {
                                     })),
                             ),
                     )
-                    .when_some(self.playback.error.clone(), |this, error| {
+                    .when_some(self.playback.error(), |this, error| {
                         this.child(
                             h_flex()
                                 .w_full()
@@ -1495,6 +1038,10 @@ fn paint_waveform(
     }
 }
 
+fn playback_progress(position: Duration, duration: Duration) -> f32 {
+    (position.as_secs_f32() / duration.as_secs_f32().max(f32::EPSILON)).clamp(0.0, 1.0)
+}
+
 fn metadata_description(metadata: AudioMetadata) -> String {
     let mut parts = Vec::new();
     if let Some(channels) = metadata.channels {
@@ -1572,6 +1119,13 @@ mod tests {
             wav.extend_from_slice(&sample.to_le_bytes());
         }
         wav
+    }
+
+    #[test]
+    fn fills_progress_for_subsecond_audio() {
+        let duration = Duration::from_micros(887_755);
+        assert_eq!(playback_progress(duration, duration), 1.0);
+        assert_eq!(playback_progress(duration / 2, duration), 0.5);
     }
 
     #[test]
