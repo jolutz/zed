@@ -30,6 +30,8 @@ use self::playback::PlaybackState;
 
 const SEEK_STEP: Duration = Duration::from_secs(5);
 const WAVEFORM_PEAK_COUNT: usize = 1_536;
+const WAVEFORM_HORIZONTAL_PADDING: f32 = 12.0;
+const VOLUME_BAR_HORIZONTAL_PADDING: f32 = 4.0;
 
 actions!(
     audio_viewer,
@@ -404,10 +406,7 @@ impl AudioView {
         let Some(duration) = self.metadata.duration else {
             return None;
         };
-        if bounds.size.width <= Pixels::ZERO {
-            return None;
-        }
-        let fraction = ((position.x - bounds.left()) / bounds.size.width).clamp(0., 1.);
+        let fraction = horizontal_progress(position.x, bounds, px(WAVEFORM_HORIZONTAL_PADDING))?;
         Some(duration.mul_f32(fraction))
     }
 
@@ -460,6 +459,54 @@ impl AudioView {
         if !*hovered && self.scrub_position.is_none() {
             self.hover_position = None;
         }
+        cx.notify();
+    }
+
+    fn set_volume_from_position(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        bounds: &Rc<RefCell<Option<Bounds<Pixels>>>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = *bounds.borrow() else {
+            return;
+        };
+        let Some(volume) =
+            horizontal_progress(position.x, bounds, px(VOLUME_BAR_HORIZONTAL_PADDING))
+        else {
+            return;
+        };
+        self.playback.set_volume(volume);
+        cx.notify();
+    }
+
+    fn volume_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        bounds: &Rc<RefCell<Option<Bounds<Pixels>>>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_volume_from_position(event.position, bounds, cx);
+        cx.stop_propagation();
+    }
+
+    fn volume_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        bounds: &Rc<RefCell<Option<Bounds<Pixels>>>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        self.set_volume_from_position(event.position, bounds, cx);
+        cx.stop_propagation();
+    }
+
+    fn toggle_mute(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.playback.toggle_mute();
         cx.notify();
     }
 }
@@ -634,12 +681,21 @@ impl Render for AudioView {
             .to_uppercase();
         let is_playing = self.playback.is_playing();
         let can_seek = metadata.duration.is_some();
+        let show_milliseconds = metadata
+            .duration
+            .is_some_and(|duration| duration < Duration::from_secs(1));
+        let volume = self.playback.volume();
+        let muted = volume <= f32::EPSILON;
         let seek_bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
         let seek_bounds_for_canvas = seek_bounds.clone();
+        let volume_bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
+        let volume_bounds_for_canvas = volume_bounds.clone();
         let waveform_peaks = self.waveform_peaks.clone();
         let unplayed_color = cx.theme().colors().border_variant;
         let played_color = cx.theme().colors().text_accent;
         let hover_color = cx.theme().colors().text_muted.opacity(0.55);
+        let volume_track_color = cx.theme().colors().border_variant;
+        let volume_fill_color = cx.theme().colors().text_accent;
         let show_playhead = self.seek_bar_hovered
             || self.scrub_position.is_some()
             || self.focus_handle.is_focused(window);
@@ -823,79 +879,186 @@ impl Render for AudioView {
                                     .gap_3()
                                     .text_sm()
                                     .text_color(cx.theme().colors().text_muted)
-                                    .child(format_duration(position))
+                                    .child(format_duration(position, show_milliseconds))
                                     .when_some(self.hover_position, |this, hover_position| {
                                         this.child(format!(
                                             "Seek to {}",
-                                            format_duration(hover_position)
+                                            format_duration(hover_position, show_milliseconds)
                                         ))
                                     })
                                     .child(
                                         metadata
                                             .duration
-                                            .map(format_duration)
+                                            .map(|duration| {
+                                                format_duration(duration, show_milliseconds)
+                                            })
                                             .unwrap_or_else(|| "Unknown duration".to_string()),
                                     ),
                             ),
                     )
                     .child(
-                        h_flex()
+                        v_flex()
                             .items_center()
-                            .justify_center()
-                            .gap_3()
+                            .gap_2()
                             .child(
-                                div()
-                                    .id("audio-play-pause")
-                                    .w(px(44.))
-                                    .h(px(44.))
-                                    .flex_none()
-                                    .flex()
+                                h_flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .bg(cx.theme().colors().text_accent.opacity(0.14))
-                                    .hover(|style| {
-                                        style.bg(cx.theme().colors().text_accent.opacity(0.22))
-                                    })
-                                    .role(gpui::accesskit::Role::Button)
-                                    .aria_label(if is_playing { "Pause" } else { "Play" })
-                                    .tooltip(move |_window, cx| {
-                                        Tooltip::for_action(
-                                            if is_playing { "Pause" } else { "Play" },
-                                            &TogglePlayback,
-                                            cx,
-                                        )
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_playback(&TogglePlayback, window, cx);
-                                    }))
+                                    .gap_3()
                                     .child(
-                                        Icon::new(if is_playing {
-                                            IconName::DebugPause
-                                        } else {
-                                            IconName::PlayFilled
-                                        })
-                                        .size(IconSize::Medium)
-                                        .color(Color::Accent),
+                                        div()
+                                            .id("audio-play-pause")
+                                            .w(px(44.))
+                                            .h(px(44.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .cursor_pointer()
+                                            .bg(cx.theme().colors().text_accent.opacity(0.14))
+                                            .hover(|style| {
+                                                style.bg(cx
+                                                    .theme()
+                                                    .colors()
+                                                    .text_accent
+                                                    .opacity(0.22))
+                                            })
+                                            .role(gpui::accesskit::Role::Button)
+                                            .aria_label(if is_playing { "Pause" } else { "Play" })
+                                            .tooltip(move |_window, cx| {
+                                                Tooltip::for_action(
+                                                    if is_playing { "Pause" } else { "Play" },
+                                                    &TogglePlayback,
+                                                    cx,
+                                                )
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.toggle_playback(&TogglePlayback, window, cx);
+                                            }))
+                                            .child(
+                                                Icon::new(if is_playing {
+                                                    IconName::DebugPause
+                                                } else {
+                                                    IconName::PlayFilled
+                                                })
+                                                .size(IconSize::Medium)
+                                                .color(Color::Accent),
+                                            ),
+                                    )
+                                    .child(
+                                        IconButton::new("audio-reset", IconName::RotateCcw)
+                                            .shape(IconButtonShape::Square)
+                                            .icon_size(IconSize::Small)
+                                            .disabled(!can_seek)
+                                            .aria_label("Return to beginning")
+                                            .tooltip(|_window, cx| {
+                                                Tooltip::for_action(
+                                                    "Return to Beginning",
+                                                    &ResetPlayback,
+                                                    cx,
+                                                )
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.reset_playback(&ResetPlayback, window, cx);
+                                            })),
                                     ),
                             )
                             .child(
-                                IconButton::new("audio-reset", IconName::RotateCcw)
-                                    .shape(IconButtonShape::Square)
-                                    .icon_size(IconSize::Small)
-                                    .disabled(!can_seek)
-                                    .aria_label("Return to beginning")
-                                    .tooltip(|_window, cx| {
-                                        Tooltip::for_action(
-                                            "Return to Beginning",
-                                            &ResetPlayback,
-                                            cx,
+                                h_flex()
+                                    .w(px(208.))
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_1()
+                                    .child(
+                                        IconButton::new(
+                                            "audio-mute",
+                                            if muted {
+                                                IconName::AudioOff
+                                            } else {
+                                                IconName::AudioOn
+                                            },
                                         )
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.reset_playback(&ResetPlayback, window, cx);
-                                    })),
+                                        .shape(IconButtonShape::Square)
+                                        .icon_size(IconSize::Small)
+                                        .aria_label(if muted { "Unmute" } else { "Mute" })
+                                        .tooltip(Tooltip::text(if muted {
+                                            "Unmute"
+                                        } else {
+                                            "Mute"
+                                        }))
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.toggle_mute(window, cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("audio-volume")
+                                            .w(px(120.))
+                                            .h(px(24.))
+                                            .cursor_pointer()
+                                            .role(gpui::accesskit::Role::Slider)
+                                            .aria_label("Volume")
+                                            .aria_numeric_value(f64::from(volume * 100.0))
+                                            .aria_min_numeric_value(0.0)
+                                            .aria_max_numeric_value(100.0)
+                                            .aria_numeric_value_step(1.0)
+                                            .tooltip(Tooltip::text(format!(
+                                                "Volume: {:.0}%",
+                                                volume * 100.0
+                                            )))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener({
+                                                    let volume_bounds = volume_bounds.clone();
+                                                    move |this, event, window, cx| {
+                                                        this.volume_mouse_down(
+                                                            event,
+                                                            &volume_bounds,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    }
+                                                }),
+                                            )
+                                            .on_mouse_move(cx.listener({
+                                                move |this, event, window, cx| {
+                                                    this.volume_mouse_move(
+                                                        event,
+                                                        &volume_bounds,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            }))
+                                            .child(
+                                                canvas(
+                                                    move |bounds, _, _| {
+                                                        *volume_bounds_for_canvas.borrow_mut() =
+                                                            Some(bounds);
+                                                    },
+                                                    move |bounds, _, window, _| {
+                                                        paint_volume_bar(
+                                                            bounds,
+                                                            volume,
+                                                            volume_track_color,
+                                                            volume_fill_color,
+                                                            window,
+                                                        );
+                                                    },
+                                                )
+                                                .size_full(),
+                                            ),
+                                    )
+                                    .child(
+                                        div().w(px(36.)).child(
+                                            Label::new(format!("{:.0}%", volume * 100.0))
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        ),
+                                    ),
                             ),
                     )
                     .when_some(self.playback.error(), |this, error| {
@@ -950,6 +1113,18 @@ impl ProjectItem for AudioView {
     }
 }
 
+fn horizontal_progress(
+    position_x: Pixels,
+    bounds: Bounds<Pixels>,
+    horizontal_padding: Pixels,
+) -> Option<f32> {
+    let width = bounds.size.width - horizontal_padding * 2.;
+    if width <= Pixels::ZERO {
+        return None;
+    }
+    Some(((position_x - bounds.left() - horizontal_padding) / width).clamp(0.0, 1.0))
+}
+
 fn paint_waveform(
     bounds: Bounds<Pixels>,
     waveform_peaks: Option<&[f32]>,
@@ -962,7 +1137,7 @@ fn paint_waveform(
     window: &mut Window,
 ) {
     let center_y = (bounds.top() + bounds.bottom()) / 2.;
-    let horizontal_padding = px(12.);
+    let horizontal_padding = px(WAVEFORM_HORIZONTAL_PADDING);
     let waveform_left = bounds.left() + horizontal_padding;
     let waveform_width = (bounds.size.width - horizontal_padding * 2.).max(px(1.));
     let maximum_height = (bounds.size.height - px(24.)).max(px(2.));
@@ -1038,6 +1213,47 @@ fn paint_waveform(
     }
 }
 
+fn paint_volume_bar(
+    bounds: Bounds<Pixels>,
+    volume: f32,
+    track_color: gpui::Hsla,
+    fill_color: gpui::Hsla,
+    window: &mut Window,
+) {
+    let center_y = (bounds.top() + bounds.bottom()) / 2.;
+    let horizontal_padding = px(VOLUME_BAR_HORIZONTAL_PADDING);
+    let left = bounds.left() + horizontal_padding;
+    let width = (bounds.size.width - horizontal_padding * 2.).max(px(1.));
+    let volume = volume.clamp(0.0, 1.0);
+
+    let mut track = fill(
+        Bounds::centered_at(point(left + width / 2., center_y), size(width, px(3.))),
+        track_color,
+    );
+    track.corner_radii = (1.5).into();
+    window.paint_quad(track);
+
+    if volume > 0.0 {
+        let fill_width = width * volume;
+        let mut filled_track = fill(
+            Bounds::centered_at(
+                point(left + fill_width / 2., center_y),
+                size(fill_width, px(3.)),
+            ),
+            fill_color,
+        );
+        filled_track.corner_radii = (1.5).into();
+        window.paint_quad(filled_track);
+    }
+
+    let mut knob = fill(
+        Bounds::centered_at(point(left + width * volume, center_y), size(px(8.), px(8.))),
+        fill_color,
+    );
+    knob.corner_radii = (4.).into();
+    window.paint_quad(knob);
+}
+
 fn playback_progress(position: Duration, duration: Duration) -> f32 {
     (position.as_secs_f32() / duration.as_secs_f32().max(f32::EPSILON)).clamp(0.0, 1.0)
 }
@@ -1059,7 +1275,7 @@ fn metadata_description(metadata: AudioMetadata) -> String {
 }
 
 fn format_sample_rate(sample_rate: u32) -> String {
-    if sample_rate % 1_000 == 0 {
+    if sample_rate.is_multiple_of(1_000) {
         format!("{} kHz", sample_rate / 1_000)
     } else {
         format!("{:.1} kHz", sample_rate as f64 / 1_000.0)
@@ -1079,13 +1295,15 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-fn format_duration(duration: Duration) -> String {
+fn format_duration(duration: Duration, show_milliseconds: bool) -> String {
     let total_seconds = duration.as_secs();
     let hours = total_seconds / 3_600;
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
     if hours > 0 {
         format!("{hours}:{:02}:{seconds:02}", minutes % 60)
+    } else if show_milliseconds {
+        format!("{minutes}:{seconds:02}.{:03}", duration.subsec_millis())
     } else {
         format!("{minutes}:{seconds:02}")
     }
@@ -1099,7 +1317,7 @@ mod tests {
         let bits_per_sample = 16u16;
         let block_align = channels * bits_per_sample / 8;
         let byte_rate = sample_rate * u32::from(block_align);
-        let data_size = (samples.len() * std::mem::size_of::<i16>()) as u32;
+        let data_size = std::mem::size_of_val(samples) as u32;
         let riff_size = 36u32 + data_size;
         let mut wav = Vec::with_capacity(44 + data_size as usize);
         wav.extend_from_slice(b"RIFF");
@@ -1119,6 +1337,18 @@ mod tests {
             wav.extend_from_slice(&sample.to_le_bytes());
         }
         wav
+    }
+
+    #[test]
+    fn maps_pointer_positions_to_padded_waveform() {
+        let bounds = Bounds::new(point(px(100.), px(0.)), size(px(200.), px(20.)));
+        let padding = px(WAVEFORM_HORIZONTAL_PADDING);
+
+        assert_eq!(horizontal_progress(px(100.), bounds, padding), Some(0.0));
+        assert_eq!(horizontal_progress(px(112.), bounds, padding), Some(0.0));
+        assert_eq!(horizontal_progress(px(200.), bounds, padding), Some(0.5));
+        assert_eq!(horizontal_progress(px(288.), bounds, padding), Some(1.0));
+        assert_eq!(horizontal_progress(px(300.), bounds, padding), Some(1.0));
     }
 
     #[test]
@@ -1185,7 +1415,14 @@ mod tests {
     fn formats_audio_metadata_for_display() {
         assert_eq!(format_sample_rate(44_100), "44.1 kHz");
         assert_eq!(format_sample_rate(48_000), "48 kHz");
-        assert_eq!(format_duration(Duration::from_secs(3_751)), "1:02:31");
+        assert_eq!(
+            format_duration(Duration::from_secs(3_751), false),
+            "1:02:31"
+        );
+        assert_eq!(
+            format_duration(Duration::from_micros(887_755), true),
+            "0:00.887"
+        );
         assert_eq!(
             metadata_description(AudioMetadata {
                 file_size: 8 * 1024 * 1024,

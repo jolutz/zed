@@ -65,12 +65,16 @@ enum PlaybackCommand {
         bytes: Arc<Vec<u8>>,
         format_hint: Option<String>,
         offset: Duration,
+        volume: f32,
     },
     Pause,
     Resume,
     Seek {
         position: Duration,
         seek_id: u64,
+    },
+    SetVolume {
+        volume: f32,
     },
     Stop,
     Shutdown,
@@ -204,13 +208,20 @@ fn handle_playback_command(
             bytes,
             format_hint,
             offset,
+            volume,
         } => {
             snapshot.update(|snapshot| {
                 snapshot.status = PlaybackStatus::Starting;
                 snapshot.position = offset;
                 snapshot.error = None;
             });
-            match start_playback_session(bytes, format_hint.as_deref(), offset, snapshot.clone()) {
+            match start_playback_session(
+                bytes,
+                format_hint.as_deref(),
+                offset,
+                volume,
+                snapshot.clone(),
+            ) {
                 Ok(new_session) => {
                     *session = Some(new_session);
                     snapshot.update(|snapshot| snapshot.status = PlaybackStatus::Playing);
@@ -254,13 +265,21 @@ fn handle_playback_command(
                         snapshot.completed_seek_id = seek_id;
                     }),
                     Err(error) => {
+                        let position = session.player.get_pos();
                         log::error!("failed to seek audio file: {error:?}");
                         snapshot.update(|snapshot| {
+                            snapshot.position = position;
                             snapshot.error =
                                 Some(format!("Could not seek in the audio file: {error}"));
+                            snapshot.completed_seek_id = seek_id;
                         });
                     }
                 }
+            }
+        }
+        PlaybackCommand::SetVolume { volume } => {
+            if let Some(session) = session {
+                session.player.set_volume(volume);
             }
         }
         PlaybackCommand::Stop => {
@@ -276,6 +295,7 @@ fn start_playback_session(
     bytes: Arc<Vec<u8>>,
     format_hint: Option<&str>,
     offset: Duration,
+    volume: f32,
     snapshot: Arc<SharedPlaybackSnapshot>,
 ) -> Result<PlaybackSession> {
     let decoder = decode_audio(bytes, format_hint)?;
@@ -293,7 +313,9 @@ fn start_playback_session(
         .context("Could not open the audio output device")?;
     output.log_on_drop(false);
     let player = Player::connect_new(output.mixer());
-    if !offset.is_zero() {
+    if offset.is_zero() {
+        player.set_volume(volume);
+    } else {
         player.set_volume(0.0);
     }
     player.append(decoder);
@@ -301,7 +323,7 @@ fn start_playback_session(
         player
             .try_seek(offset)
             .context("Could not seek to the playback position")?;
-        fade_player_volume(&player, 0.0, 1.0);
+        fade_player_volume(&player, 0.0, volume);
     }
 
     Ok(PlaybackSession {
@@ -335,19 +357,39 @@ fn fade_player_volume(player: &Player, start: f32, end: f32) {
     }
 }
 
-#[derive(Default)]
 pub(super) struct PlaybackState {
     controller: Option<PlaybackController>,
     status: PlaybackStatus,
     position: Duration,
     error: Option<String>,
+    volume: f32,
+    last_nonzero_volume: f32,
     next_seek_id: u64,
     pending_seek_id: Option<u64>,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            controller: None,
+            status: PlaybackStatus::default(),
+            position: Duration::ZERO,
+            error: None,
+            volume: 1.0,
+            last_nonzero_volume: 1.0,
+            next_seek_id: 0,
+            pending_seek_id: None,
+        }
+    }
 }
 
 impl PlaybackState {
     pub(super) fn position(&self) -> Duration {
         self.position
+    }
+
+    pub(super) fn volume(&self) -> f32 {
+        self.volume
     }
 
     pub(super) fn is_playing(&self) -> bool {
@@ -374,6 +416,10 @@ impl PlaybackState {
             return;
         };
         let snapshot = controller.snapshot();
+        self.apply_snapshot(snapshot);
+    }
+
+    fn apply_snapshot(&mut self, snapshot: PlaybackSnapshot) {
         if self
             .pending_seek_id
             .is_some_and(|seek_id| snapshot.completed_seek_id < seek_id)
@@ -416,6 +462,30 @@ impl PlaybackState {
     pub(super) fn pause(&mut self) {
         if self.send(PlaybackCommand::Pause) {
             self.status = PlaybackStatus::Paused;
+        }
+    }
+
+    pub(super) fn set_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.volume = volume;
+        if volume > 0.0 {
+            self.last_nonzero_volume = volume;
+        }
+
+        if matches!(
+            self.status,
+            PlaybackStatus::Starting | PlaybackStatus::Playing | PlaybackStatus::Paused
+        ) && !self.send(PlaybackCommand::SetVolume { volume })
+        {
+            return;
+        }
+    }
+
+    pub(super) fn toggle_mute(&mut self) {
+        if self.volume > 0.0 {
+            self.set_volume(0.0);
+        } else {
+            self.set_volume(self.last_nonzero_volume);
         }
     }
 
@@ -475,10 +545,104 @@ impl PlaybackState {
             bytes,
             format_hint,
             offset: self.position,
+            volume: self.volume,
         };
         if self.send(command) {
             self.status = PlaybackStatus::Starting;
             self.error = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_snapshot_is_ignored_while_seek_is_pending() {
+        let position = Duration::from_secs(12);
+        let error = Some("existing error".to_string());
+        let mut playback = PlaybackState {
+            status: PlaybackStatus::Paused,
+            position,
+            error: error.clone(),
+            pending_seek_id: Some(2),
+            ..PlaybackState::default()
+        };
+
+        playback.apply_snapshot(PlaybackSnapshot {
+            status: PlaybackStatus::Playing,
+            position: Duration::from_secs(4),
+            error: None,
+            completed_seek_id: 1,
+        });
+
+        assert_eq!(playback.status, PlaybackStatus::Paused);
+        assert_eq!(playback.position, position);
+        assert_eq!(playback.error, error);
+        assert_eq!(playback.pending_seek_id, Some(2));
+    }
+
+    #[test]
+    fn acknowledged_failed_seek_applies_actual_position_and_error() {
+        let actual_position = Duration::from_secs(7);
+        let mut playback = PlaybackState {
+            status: PlaybackStatus::Playing,
+            position: Duration::from_secs(20),
+            pending_seek_id: Some(3),
+            ..PlaybackState::default()
+        };
+
+        playback.apply_snapshot(PlaybackSnapshot {
+            status: PlaybackStatus::Playing,
+            position: actual_position,
+            error: Some("seek failed".to_string()),
+            completed_seek_id: 3,
+        });
+
+        assert_eq!(playback.status, PlaybackStatus::Playing);
+        assert_eq!(playback.position, actual_position);
+        assert_eq!(playback.error.as_deref(), Some("seek failed"));
+        assert_eq!(playback.pending_seek_id, None);
+    }
+
+    #[test]
+    fn seeking_from_finished_transitions_to_idle_and_preserves_position() {
+        let position = Duration::from_secs(9);
+        let mut playback = PlaybackState {
+            status: PlaybackStatus::Finished,
+            position: Duration::from_secs(30),
+            error: Some("previous error".to_string()),
+            ..PlaybackState::default()
+        };
+
+        playback.seek_to(position);
+
+        assert_eq!(playback.status, PlaybackStatus::Idle);
+        assert_eq!(playback.position, position);
+        assert_eq!(playback.error, None);
+    }
+
+    #[test]
+    fn volume_is_clamped_to_supported_range() {
+        let mut playback = PlaybackState::default();
+
+        playback.set_volume(2.0);
+        assert_eq!(playback.volume(), 1.0);
+
+        playback.set_volume(-1.0);
+        assert_eq!(playback.volume(), 0.0);
+    }
+
+    #[test]
+    fn mute_restores_previous_volume() {
+        let mut playback = PlaybackState::default();
+        playback.set_volume(0.35);
+
+        playback.toggle_mute();
+        assert_eq!(playback.volume(), 0.0);
+
+        playback.toggle_mute();
+        assert_eq!(playback.volume(), 0.35);
     }
 }
