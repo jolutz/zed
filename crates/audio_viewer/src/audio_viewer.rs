@@ -578,9 +578,11 @@ impl Render for AudioView {
             .on_action(cx.listener(Self::seek_forward))
             .on_action(cx.listener(Self::reset_playback))
             .size_full()
+            .id("audio-viewer-scroll")
+            .overflow_y_scroll()
             .bg(cx.theme().colors().editor_background)
             .flex()
-            .items_center()
+            .items_start()
             .justify_center()
             .p_4()
             .child(
