@@ -1,3 +1,4 @@
+mod analysis;
 mod playback;
 
 use std::{cell::RefCell, io::Cursor, path::Path, rc::Rc, sync::Arc, time::Duration};
@@ -12,7 +13,7 @@ use gpui::{
 };
 use language::File as _;
 use project::{AudioItem, AudioItemEvent, Project};
-use rodio::{Decoder, Source};
+use rodio::Decoder;
 use settings::Settings;
 use theme_settings::ThemeSettings;
 use ui::{
@@ -26,10 +27,12 @@ use workspace::{
     item::{HighlightedText, Item, ProjectItem, TabContentParams},
 };
 
-use self::playback::PlaybackState;
+use self::{
+    analysis::{AudioMetrics, SilenceRange, WaveformBucket, analyze_audio},
+    playback::PlaybackState,
+};
 
 const SEEK_STEP: Duration = Duration::from_secs(5);
-const WAVEFORM_PEAK_COUNT: usize = 1_536;
 const WAVEFORM_HORIZONTAL_PADDING: f32 = 12.0;
 const VOLUME_BAR_HORIZONTAL_PADDING: f32 = 4.0;
 
@@ -73,12 +76,6 @@ impl AsRef<[u8]> for SharedAudioBytes {
     }
 }
 
-#[derive(Debug)]
-struct AudioAnalysis {
-    metadata: AudioMetadata,
-    waveform_peaks: Arc<Vec<f32>>,
-}
-
 fn decode_audio(
     bytes: Arc<Vec<u8>>,
     format_hint: Option<&str>,
@@ -93,152 +90,6 @@ fn decode_audio(
     builder.build().context("Could not decode the audio file")
 }
 
-fn analyze_audio(bytes: Arc<Vec<u8>>, format_hint: Option<String>) -> Result<AudioAnalysis> {
-    let file_size = bytes.len() as u64;
-    let mut decoder = decode_audio(bytes.clone(), format_hint.as_deref())?;
-    let channels = decoder.channels().get();
-    let sample_rate = decoder.sample_rate().get();
-    let duration = wav_duration_from_bytes(bytes.as_slice()).or_else(|| decoder.total_duration());
-    let waveform_peaks = extract_waveform_peaks(&mut decoder, duration, sample_rate, channels);
-
-    Ok(AudioAnalysis {
-        metadata: AudioMetadata {
-            file_size,
-            duration,
-            channels: Some(channels),
-            sample_rate: Some(sample_rate),
-        },
-        waveform_peaks: Arc::new(waveform_peaks),
-    })
-}
-
-fn extract_waveform_peaks(
-    decoder: &mut Decoder<Cursor<SharedAudioBytes>>,
-    duration: Option<Duration>,
-    sample_rate: u32,
-    channels: u16,
-) -> Vec<f32> {
-    let expected_frames = duration
-        .map(|duration| duration.as_secs_f64() * sample_rate as f64)
-        .map(|frames| frames.ceil() as usize)
-        .filter(|frames| *frames > 0);
-    let channels = usize::from(channels.max(1));
-    let mut peaks = vec![0.0_f32; WAVEFORM_PEAK_COUNT];
-    let mut decoded_frames = 0usize;
-
-    if let Some(expected_frames) = expected_frames {
-        for (sample_index, sample) in decoder.enumerate() {
-            let frame_index = sample_index / channels;
-            let peak_index = frame_index
-                .saturating_mul(WAVEFORM_PEAK_COUNT)
-                .checked_div(expected_frames)
-                .unwrap_or_default()
-                .min(WAVEFORM_PEAK_COUNT - 1);
-            peaks[peak_index] = peaks[peak_index].max(sample.abs());
-            decoded_frames = frame_index.saturating_add(1);
-        }
-    } else {
-        let mut frames_per_peak = 1_024usize;
-        for (sample_index, sample) in decoder.enumerate() {
-            let frame_index = sample_index / channels;
-            let mut peak_index = frame_index / frames_per_peak;
-            if peak_index >= WAVEFORM_PEAK_COUNT {
-                for index in 0..WAVEFORM_PEAK_COUNT / 2 {
-                    peaks[index] = peaks[index * 2].max(peaks[index * 2 + 1]);
-                }
-                peaks[WAVEFORM_PEAK_COUNT / 2..].fill(0.0);
-                frames_per_peak = frames_per_peak.saturating_mul(2);
-                peak_index = frame_index / frames_per_peak;
-            }
-            peaks[peak_index.min(WAVEFORM_PEAK_COUNT - 1)] =
-                peaks[peak_index.min(WAVEFORM_PEAK_COUNT - 1)].max(sample.abs());
-            decoded_frames = frame_index.saturating_add(1);
-        }
-    }
-
-    let populated_peaks = expected_frames
-        .map(|_| WAVEFORM_PEAK_COUNT)
-        .unwrap_or_else(|| {
-            decoded_frames
-                .checked_add(1_023)
-                .and_then(|frames| frames.checked_div(1_024))
-                .unwrap_or_default()
-                .clamp(1, WAVEFORM_PEAK_COUNT)
-        });
-    peaks.truncate(populated_peaks);
-
-    let maximum_peak = peaks.iter().copied().fold(0.0_f32, f32::max);
-    if maximum_peak > 0.0 {
-        for peak in &mut peaks {
-            *peak = (*peak / maximum_peak).clamp(0.0, 1.0);
-        }
-    }
-    peaks
-}
-
-fn wav_duration_from_bytes(bytes: &[u8]) -> Option<Duration> {
-    if bytes.len() < 12 || bytes.get(0..4)? != b"RIFF" || bytes.get(8..12)? != b"WAVE" {
-        return None;
-    }
-
-    let mut byte_rate = None;
-    let mut block_align = None;
-    let mut data_size = None;
-    let mut offset = 12usize;
-
-    while offset.checked_add(8)? <= bytes.len() {
-        let chunk_id = bytes.get(offset..offset + 4)?;
-        let declared_chunk_size =
-            u32::from_le_bytes(bytes.get(offset + 4..offset + 8)?.try_into().ok()?) as usize;
-        let chunk_data_offset = offset.checked_add(8)?;
-        let available_size = bytes.len().saturating_sub(chunk_data_offset);
-        let chunk_size = declared_chunk_size.min(available_size);
-
-        match chunk_id {
-            b"fmt " if chunk_size >= 16 => {
-                let format = u16::from_le_bytes(
-                    bytes
-                        .get(chunk_data_offset..chunk_data_offset + 2)?
-                        .try_into()
-                        .ok()?,
-                );
-                let current_byte_rate = u32::from_le_bytes(
-                    bytes
-                        .get(chunk_data_offset + 8..chunk_data_offset + 12)?
-                        .try_into()
-                        .ok()?,
-                );
-                let current_block_align = u16::from_le_bytes(
-                    bytes
-                        .get(chunk_data_offset + 12..chunk_data_offset + 14)?
-                        .try_into()
-                        .ok()?,
-                );
-
-                if format == 1 && current_byte_rate > 0 && current_block_align > 0 {
-                    byte_rate = Some(current_byte_rate as u64);
-                    block_align = Some(current_block_align as u64);
-                }
-            }
-            b"data" => {
-                data_size = Some(chunk_size as u64);
-                break;
-            }
-            _ => {}
-        }
-
-        offset = chunk_data_offset
-            .checked_add(declared_chunk_size)?
-            .checked_add(declared_chunk_size % 2)?;
-    }
-
-    let byte_rate = byte_rate?;
-    let block_align = block_align?;
-    let data_size = data_size?;
-    let data_size = data_size - data_size % block_align;
-    Some(Duration::from_secs_f64(data_size as f64 / byte_rate as f64))
-}
-
 pub enum AudioViewEvent {
     TitleChanged,
 }
@@ -251,7 +102,9 @@ pub struct AudioView {
     focus_handle: FocusHandle,
     playback: PlaybackState,
     metadata: AudioMetadata,
-    waveform_peaks: Option<Arc<Vec<f32>>>,
+    waveform: Option<Arc<Vec<WaveformBucket>>>,
+    silence_ranges: Option<Arc<Vec<SilenceRange>>>,
+    metrics: Option<Arc<AudioMetrics>>,
     analysis_error: Option<String>,
     analysis_task: Task<()>,
     scrub_position: Option<Duration>,
@@ -287,7 +140,9 @@ impl AudioView {
             focus_handle: cx.focus_handle(),
             playback: PlaybackState::default(),
             metadata,
-            waveform_peaks: None,
+            waveform: None,
+            silence_ranges: None,
+            metrics: None,
             analysis_error: None,
             analysis_task,
             scrub_position: None,
@@ -309,12 +164,16 @@ impl AudioView {
                 match analysis {
                     Ok(analysis) => {
                         this.metadata = analysis.metadata;
-                        this.waveform_peaks = Some(analysis.waveform_peaks);
+                        this.waveform = Some(analysis.waveform);
+                        this.silence_ranges = Some(analysis.silence_ranges);
+                        this.metrics = Some(analysis.metrics);
                         this.analysis_error = None;
                     }
                     Err(error) => {
                         log::error!("failed to analyze audio file: {error:?}");
-                        this.waveform_peaks = None;
+                        this.waveform = None;
+                        this.silence_ranges = None;
+                        this.metrics = None;
                         this.analysis_error = Some(error.to_string());
                     }
                 }
@@ -349,7 +208,9 @@ impl AudioView {
                 self.playback.stop();
                 let bytes = self.audio_item.read(cx).bytes.clone();
                 self.metadata = AudioMetadata::loading(bytes.len() as u64);
-                self.waveform_peaks = None;
+                self.waveform = None;
+                self.silence_ranges = None;
+                self.metrics = None;
                 self.analysis_error = None;
                 self.scrub_position = None;
                 self.hover_position = None;
@@ -690,10 +551,17 @@ impl Render for AudioView {
         let seek_bounds_for_canvas = seek_bounds.clone();
         let volume_bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::default();
         let volume_bounds_for_canvas = volume_bounds.clone();
-        let waveform_peaks = self.waveform_peaks.clone();
+        let waveform = self.waveform.clone();
+        let silence_ranges = self.silence_ranges.clone();
+        let metrics = self.metrics.clone();
+        let possible_click_timestamps = metrics
+            .as_ref()
+            .map(|metrics| metrics.possible_click_timestamps.clone());
         let unplayed_color = cx.theme().colors().border_variant;
         let played_color = cx.theme().colors().text_accent;
         let hover_color = cx.theme().colors().text_muted.opacity(0.55);
+        let silence_color = cx.theme().colors().text_muted.opacity(0.10);
+        let click_marker_color = cx.theme().status().warning.opacity(0.55);
         let volume_track_color = cx.theme().colors().border_variant;
         let volume_fill_color = cx.theme().colors().text_accent;
         let show_playhead = self.seek_bar_hovered
@@ -704,7 +572,7 @@ impl Render for AudioView {
                 .duration
                 .map(|duration| playback_progress(hover_position, duration))
         });
-        let analysis_loading = self.waveform_peaks.is_none() && self.analysis_error.is_none();
+        let analysis_loading = self.waveform.is_none() && self.analysis_error.is_none();
 
         div()
             .track_focus(&self.focus_handle(cx))
@@ -829,13 +697,20 @@ impl Render for AudioView {
                                             move |bounds, _, window, _| {
                                                 paint_waveform(
                                                     bounds,
-                                                    waveform_peaks.as_deref().map(Vec::as_slice),
+                                                    waveform.as_deref().map(Vec::as_slice),
+                                                    silence_ranges.as_deref().map(Vec::as_slice),
+                                                    possible_click_timestamps
+                                                        .as_deref()
+                                                        .map(Vec::as_slice),
+                                                    metadata.duration,
                                                     progress,
                                                     hover_progress,
                                                     show_playhead,
                                                     played_color,
                                                     unplayed_color,
                                                     hover_color,
+                                                    silence_color,
+                                                    click_marker_color,
                                                     window,
                                                 );
                                             },
@@ -851,7 +726,7 @@ impl Render for AudioView {
                                                 .items_center()
                                                 .justify_center()
                                                 .child(
-                                                    Label::new("Analyzing waveform…")
+                                                    Label::new("Analyzing audio…")
                                                         .size(LabelSize::Small)
                                                         .color(Color::Muted),
                                                 ),
@@ -1061,6 +936,12 @@ impl Render for AudioView {
                                     ),
                             ),
                     )
+                    .child(render_analysis_panel(
+                        metrics.as_deref(),
+                        analysis_loading,
+                        self.analysis_error.as_deref(),
+                        cx,
+                    ))
                     .when_some(self.playback.error(), |this, error| {
                         this.child(
                             h_flex()
@@ -1127,13 +1008,18 @@ fn horizontal_progress(
 
 fn paint_waveform(
     bounds: Bounds<Pixels>,
-    waveform_peaks: Option<&[f32]>,
+    waveform: Option<&[WaveformBucket]>,
+    silence_ranges: Option<&[SilenceRange]>,
+    possible_click_timestamps: Option<&[Duration]>,
+    duration: Option<Duration>,
     progress: f32,
     hover_progress: Option<f32>,
     show_playhead: bool,
     played_color: gpui::Hsla,
     unplayed_color: gpui::Hsla,
     hover_color: gpui::Hsla,
+    silence_color: gpui::Hsla,
+    click_marker_color: gpui::Hsla,
     window: &mut Window,
 ) {
     let center_y = (bounds.top() + bounds.bottom()) / 2.;
@@ -1141,47 +1027,103 @@ fn paint_waveform(
     let waveform_left = bounds.left() + horizontal_padding;
     let waveform_width = (bounds.size.width - horizontal_padding * 2.).max(px(1.));
     let maximum_height = (bounds.size.height - px(24.)).max(px(2.));
+    let half_height = maximum_height / 2.;
 
-    if let Some(peaks) = waveform_peaks.filter(|peaks| !peaks.is_empty()) {
-        let waveform_width_f32: f32 = waveform_width.into();
-        let bar_count = ((waveform_width_f32 / 4.0).floor() as usize).clamp(1, peaks.len());
-        let bar_width = px(2.);
-
-        for bar_index in 0..bar_count {
-            let peak_start = bar_index.saturating_mul(peaks.len()) / bar_count;
-            let peak_end = ((bar_index + 1).saturating_mul(peaks.len()) / bar_count)
-                .max(peak_start + 1)
-                .min(peaks.len());
-            let peak = peaks
-                .get(peak_start..peak_end)
-                .unwrap_or_default()
-                .iter()
-                .copied()
-                .fold(0.0_f32, f32::max);
-            let bar_progress = (bar_index as f32 + 0.5) / bar_count as f32;
-            let bar_height = (maximum_height * (0.08 + peak * 0.92)).max(px(2.));
-            let bar_center = point(waveform_left + waveform_width * bar_progress, center_y);
-            let mut bar = fill(
-                Bounds::centered_at(bar_center, size(bar_width, bar_height)),
-                if bar_progress <= progress {
-                    played_color
-                } else {
-                    unplayed_color
-                },
-            );
-            bar.corner_radii = (1.).into();
-            window.paint_quad(bar);
+    if let (Some(ranges), Some(duration)) = (silence_ranges, duration) {
+        for range in ranges {
+            let start = playback_progress(range.start, duration);
+            let end = playback_progress(range.end, duration);
+            let range_width = waveform_width * (end - start).max(0.0);
+            if range_width > Pixels::ZERO {
+                window.paint_quad(fill(
+                    Bounds::centered_at(
+                        point(
+                            waveform_left + waveform_width * start + range_width / 2.,
+                            center_y,
+                        ),
+                        size(range_width, maximum_height + px(8.)),
+                    ),
+                    silence_color,
+                ));
+            }
         }
-    } else {
-        let mut baseline = fill(
-            Bounds::centered_at(
-                point(waveform_left + waveform_width / 2., center_y),
-                size(waveform_width, px(2.)),
-            ),
-            unplayed_color,
-        );
-        baseline.corner_radii = (1.).into();
-        window.paint_quad(baseline);
+    }
+
+    for guide_dbfs in [-6.0_f32, -12.0, -24.0] {
+        let amplitude = 10_f32.powf(guide_dbfs / 20.0);
+        for direction in [-1.0_f32, 1.0] {
+            let guide_y = center_y - half_height * amplitude * direction;
+            window.paint_quad(fill(
+                Bounds::centered_at(
+                    point(waveform_left + waveform_width / 2., guide_y),
+                    size(waveform_width, px(1.)),
+                ),
+                unplayed_color.opacity(0.35),
+            ));
+        }
+    }
+    window.paint_quad(fill(
+        Bounds::centered_at(
+            point(waveform_left + waveform_width / 2., center_y),
+            size(waveform_width, px(1.)),
+        ),
+        unplayed_color.opacity(0.7),
+    ));
+
+    if let Some(buckets) = waveform.filter(|buckets| !buckets.is_empty()) {
+        let waveform_width_f32: f32 = waveform_width.into();
+        let bar_count = ((waveform_width_f32 / 3.0).floor() as usize).clamp(1, buckets.len());
+        let bar_width = px(2.);
+        for bar_index in 0..bar_count {
+            let bucket_start = bar_index.saturating_mul(buckets.len()) / bar_count;
+            let bucket_end = ((bar_index + 1).saturating_mul(buckets.len()) / bar_count)
+                .max(bucket_start + 1)
+                .min(buckets.len());
+            let mut minimum = 0.0_f32;
+            let mut maximum = 0.0_f32;
+            for bucket in buckets.get(bucket_start..bucket_end).unwrap_or_default() {
+                minimum = minimum.min(bucket.minimum);
+                maximum = maximum.max(bucket.maximum);
+            }
+            let bar_progress = (bar_index as f32 + 0.5) / bar_count as f32;
+            let top = center_y - half_height * maximum.clamp(-1.0, 1.0);
+            let bottom = center_y - half_height * minimum.clamp(-1.0, 1.0);
+            let bar_height = bottom - top;
+            if bar_height > Pixels::ZERO {
+                let mut bar = fill(
+                    Bounds::centered_at(
+                        point(
+                            waveform_left + waveform_width * bar_progress,
+                            (top + bottom) / 2.,
+                        ),
+                        size(bar_width, bar_height),
+                    ),
+                    if bar_progress <= progress {
+                        played_color
+                    } else {
+                        unplayed_color
+                    },
+                );
+                bar.corner_radii = (1.).into();
+                window.paint_quad(bar);
+            }
+        }
+    }
+
+    if let (Some(timestamps), Some(duration)) = (possible_click_timestamps, duration)
+        && !duration.is_zero()
+    {
+        for timestamp in timestamps {
+            let marker_progress = playback_progress((*timestamp).min(duration), duration);
+            let marker_x = (waveform_left + waveform_width * marker_progress).clamp(
+                waveform_left + px(1.),
+                waveform_left + waveform_width - px(1.),
+            );
+            window.paint_quad(fill(
+                Bounds::centered_at(point(marker_x, bounds.top() + px(8.)), size(px(2.), px(8.))),
+                click_marker_color,
+            ));
+        }
     }
 
     if let Some(hover_progress) = hover_progress {
@@ -1254,6 +1196,245 @@ fn paint_volume_bar(
     window.paint_quad(knob);
 }
 
+fn render_analysis_panel(
+    metrics: Option<&AudioMetrics>,
+    loading: bool,
+    error: Option<&str>,
+    cx: &App,
+) -> AnyElement {
+    let content = if loading {
+        analysis_status("Analyzing loudness, levels, and silence…", cx)
+    } else if let Some(error) = error {
+        analysis_status(&format!("Analysis unavailable: {error}"), cx)
+    } else if let Some(metrics) = metrics {
+        let near_clip_percentage = if metrics.total_samples == 0 {
+            0.0
+        } else {
+            metrics.near_clipped_samples as f64 * 100.0 / metrics.total_samples as f64
+        };
+
+        let dc_offsets = metrics
+            .dc_offsets
+            .iter()
+            .enumerate()
+            .map(|(channel, offset)| format!("Ch{} {:+.3}%", channel + 1, offset * 100.0))
+            .collect::<Vec<_>>()
+            .join(" • ");
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(analysis_metric_card(
+                        "Integrated",
+                        format_db(metrics.integrated_lufs, "LUFS"),
+                        "EBU R128 gated perceived loudness in LUFS. Useful for comparing TTS output loudness across clips; it can be unavailable for clips that are too short or silent.",
+                        cx,
+                    ))
+                    .child(analysis_metric_card(
+                        "Active RMS",
+                        format_db(metrics.active_speech_rms_dbfs, "dBFS"),
+                        "Raw RMS energy in 20 ms windows that are not below -50 dBFS. Useful for comparing active TTS signal level, but it is not perceptually weighted.",
+                        cx,
+                    ))
+                    .child(analysis_metric_card(
+                        "Sample peak",
+                        format_db(metrics.sample_peak_dbfs, "dBFS"),
+                        "Largest stored sample value in dBFS. Useful for checking digital headroom and potential clipping, but it does not measure inter-sample overshoot.",
+                        cx,
+                    ))
+                    .child(analysis_metric_card(
+                        "True peak",
+                        format_db(metrics.true_peak_dbtp, "dBTP"),
+                        "EBU R128 reconstructed inter-sample peak in dBTP. Useful for finding playback overshoot that can exceed the stored sample peak.",
+                        cx,
+                    )),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(analysis_metric_card(
+                        "Leading",
+                        format_duration_compact(metrics.leading_silence),
+                        "Silence at the start measured as consecutive 20 ms RMS windows below -50 dBFS, with no sub-50 ms merging. Useful for spotting TTS response latency or excess padding.",
+                        cx,
+                    ))
+                    .child(analysis_metric_card(
+                        "Trailing",
+                        format_duration_compact(metrics.trailing_silence),
+                        "Silence at the end measured as consecutive 20 ms RMS windows below -50 dBFS, with no sub-50 ms merging. Useful for spotting excess tail padding in TTS output.",
+                        cx,
+                    ))
+                    .child(analysis_metric_card(
+                        "Internal pauses",
+                        metrics.internal_pause_count.to_string(),
+                        "Number of internal silent runs made from 20 ms RMS windows below -50 dBFS, with no sub-50 ms merging. Edge silence is excluded; useful for reviewing TTS phrasing and unexpected gaps.",
+                        cx,
+                    ))
+                    .child(analysis_metric_card(
+                        "Pause total",
+                        format_duration_compact(metrics.internal_pause_total),
+                        "Total duration of all internal silent runs, excluding leading and trailing silence. Runs use 20 ms RMS windows below -50 dBFS with no sub-50 ms merging; useful for comparing TTS pacing.",
+                        cx,
+                    ))
+                    .child(analysis_metric_card(
+                        "Longest pause",
+                        format_duration_compact(metrics.internal_pause_longest),
+                        "Duration of the longest internal silent run, excluding leading and trailing silence. Runs use 20 ms RMS windows below -50 dBFS with no sub-50 ms merging; useful for finding disruptive TTS pauses.",
+                        cx,
+                    )),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(analysis_wide_card(
+                                            "DC offset",
+                                            dc_offsets,
+                                            "Per-channel sample mean shown as a signed percentage of full scale. DC offset wastes headroom and can indicate synthesis or processing bugs in a TTS pipeline.",
+                                            cx,
+                                        ))
+                    .child(analysis_metric_card(
+                        "Near-clipped",
+                        format!(
+                            "{} ({near_clip_percentage:.3}%)",
+                            metrics.near_clipped_samples
+                        ),
+                        "Individual channel samples at or above -0.1 dBFS, shown as count and percentage. Useful for finding low headroom in TTS renders, but it is not proof that clipping occurred.",
+                        cx,
+                    )),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(analysis_metric_card(
+                        "Possible clicks",
+                        metrics.possible_click_count.to_string(),
+                        "Possible discontinuities found from large isolated sample jumps, abrupt unfaded transitions around sustained regions below -50 dBFS, and abrupt non-silent file starts or ends that may click during standalone playback. This conservative TTS diagnostic can have false positives and negatives; the count may exceed the first 20 detections marked on the waveform.",
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    } else {
+        analysis_status("Analysis unavailable", cx)
+    };
+
+    v_flex()
+        .w_full()
+        .p_3()
+        .gap_3()
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().colors().border_variant)
+        .bg(cx.theme().colors().editor_background)
+        .child(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_1()
+                .child(Label::new("Analysis").size(LabelSize::Small))
+                .child(
+                    Label::new("Silence: 20 ms RMS windows below -50 dBFS")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+        )
+        .child(content)
+        .into_any_element()
+}
+
+fn analysis_metric_card(
+    label: &'static str,
+    value: String,
+    tooltip: &'static str,
+    cx: &App,
+) -> AnyElement {
+    v_flex()
+        .id(label)
+        .min_w(px(120.))
+        .flex_1()
+        .p_2()
+        .gap_0p5()
+        .rounded_sm()
+        .border_1()
+        .border_color(cx.theme().colors().border_variant)
+        .bg(cx.theme().colors().elevated_surface_background)
+        .tooltip(Tooltip::text(tooltip))
+        .child(
+            Label::new(label)
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(Label::new(value).size(LabelSize::Small).truncate())
+        .into_any_element()
+}
+
+fn analysis_wide_card(
+    label: &'static str,
+    value: String,
+    tooltip: &'static str,
+    cx: &App,
+) -> AnyElement {
+    v_flex()
+        .id(label)
+        .min_w(px(260.))
+        .flex_1()
+        .p_2()
+        .gap_0p5()
+        .rounded_sm()
+        .border_1()
+        .border_color(cx.theme().colors().border_variant)
+        .bg(cx.theme().colors().elevated_surface_background)
+        .tooltip(Tooltip::text(tooltip))
+        .child(
+            Label::new(label)
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(Label::new(value).size(LabelSize::Small).line_clamp(2))
+        .into_any_element()
+}
+
+fn analysis_status(message: &str, cx: &App) -> AnyElement {
+    div()
+        .w_full()
+        .p_3()
+        .rounded_sm()
+        .border_1()
+        .border_color(cx.theme().colors().border_variant)
+        .bg(cx.theme().colors().elevated_surface_background)
+        .child(
+            Label::new(message.to_string())
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .line_clamp(2),
+        )
+        .into_any_element()
+}
+
+fn format_db(value: Option<f64>, unit: &str) -> String {
+    value
+        .map(|value| format!("{value:.1} {unit}"))
+        .unwrap_or_else(|| format!("Unavailable {unit}"))
+}
+
+fn format_duration_compact(duration: Duration) -> String {
+    if duration < Duration::from_secs(10) {
+        format!("{:.2} s", duration.as_secs_f64())
+    } else {
+        format_duration(duration, false)
+    }
+}
+
 fn playback_progress(position: Duration, duration: Duration) -> f32 {
     (position.as_secs_f32() / duration.as_secs_f32().max(f32::EPSILON)).clamp(0.0, 1.0)
 }
@@ -1313,32 +1494,6 @@ fn format_duration(duration: Duration, show_milliseconds: bool) -> String {
 mod tests {
     use super::*;
 
-    fn pcm_wav(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
-        let bits_per_sample = 16u16;
-        let block_align = channels * bits_per_sample / 8;
-        let byte_rate = sample_rate * u32::from(block_align);
-        let data_size = std::mem::size_of_val(samples) as u32;
-        let riff_size = 36u32 + data_size;
-        let mut wav = Vec::with_capacity(44 + data_size as usize);
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&riff_size.to_le_bytes());
-        wav.extend_from_slice(b"WAVE");
-        wav.extend_from_slice(b"fmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&channels.to_le_bytes());
-        wav.extend_from_slice(&sample_rate.to_le_bytes());
-        wav.extend_from_slice(&byte_rate.to_le_bytes());
-        wav.extend_from_slice(&block_align.to_le_bytes());
-        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&data_size.to_le_bytes());
-        for sample in samples {
-            wav.extend_from_slice(&sample.to_le_bytes());
-        }
-        wav
-    }
-
     #[test]
     fn maps_pointer_positions_to_padded_waveform() {
         let bounds = Bounds::new(point(px(100.), px(0.)), size(px(200.), px(20.)));
@@ -1356,59 +1511,6 @@ mod tests {
         let duration = Duration::from_micros(887_755);
         assert_eq!(playback_progress(duration, duration), 1.0);
         assert_eq!(playback_progress(duration / 2, duration), 0.5);
-    }
-
-    #[test]
-    fn computes_duration_from_available_wav_data_when_sizes_are_maxed() {
-        let sample_rate = 24_000u32;
-        let byte_rate = sample_rate * 2;
-        let block_align = 2u16;
-        let data_bytes = byte_rate as usize;
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&u32::MAX.to_le_bytes());
-        wav.extend_from_slice(b"WAVE");
-        wav.extend_from_slice(b"fmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&sample_rate.to_le_bytes());
-        wav.extend_from_slice(&byte_rate.to_le_bytes());
-        wav.extend_from_slice(&block_align.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&u32::MAX.to_le_bytes());
-        wav.resize(wav.len() + data_bytes, 0);
-
-        assert_eq!(wav_duration_from_bytes(&wav), Some(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn analyzes_metadata_and_normalized_waveform_peaks() {
-        let sample_rate = 8_000u32;
-        let samples = (0..sample_rate)
-            .map(|index| if index % 64 < 32 { i16::MAX } else { 0 })
-            .collect::<Vec<_>>();
-        let wav = pcm_wav(sample_rate, 1, &samples);
-
-        let analysis = analyze_audio(Arc::new(wav), Some("wav".to_string()));
-        assert!(analysis.is_ok(), "test WAV should decode: {analysis:?}");
-        let Ok(analysis) = analysis else {
-            return;
-        };
-
-        assert_eq!(analysis.metadata.duration, Some(Duration::from_secs(1)));
-        assert_eq!(analysis.metadata.channels, Some(1));
-        assert_eq!(analysis.metadata.sample_rate, Some(sample_rate));
-        assert_eq!(analysis.waveform_peaks.len(), WAVEFORM_PEAK_COUNT);
-        assert_eq!(
-            analysis
-                .waveform_peaks
-                .iter()
-                .copied()
-                .fold(0.0_f32, f32::max),
-            1.0
-        );
     }
 
     #[test]
