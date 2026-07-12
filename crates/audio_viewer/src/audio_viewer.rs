@@ -554,14 +554,10 @@ impl Render for AudioView {
         let waveform = self.waveform.clone();
         let silence_ranges = self.silence_ranges.clone();
         let metrics = self.metrics.clone();
-        let possible_click_timestamps = metrics
-            .as_ref()
-            .map(|metrics| metrics.possible_click_timestamps.clone());
         let unplayed_color = cx.theme().colors().border_variant;
         let played_color = cx.theme().colors().text_accent;
         let hover_color = cx.theme().colors().text_muted.opacity(0.55);
         let silence_color = cx.theme().colors().text_muted.opacity(0.10);
-        let click_marker_color = cx.theme().status().warning.opacity(0.55);
         let volume_track_color = cx.theme().colors().border_variant;
         let volume_fill_color = cx.theme().colors().text_accent;
         let show_playhead = self.seek_bar_hovered
@@ -699,9 +695,6 @@ impl Render for AudioView {
                                                     bounds,
                                                     waveform.as_deref().map(Vec::as_slice),
                                                     silence_ranges.as_deref().map(Vec::as_slice),
-                                                    possible_click_timestamps
-                                                        .as_deref()
-                                                        .map(Vec::as_slice),
                                                     metadata.duration,
                                                     progress,
                                                     hover_progress,
@@ -710,7 +703,6 @@ impl Render for AudioView {
                                                     unplayed_color,
                                                     hover_color,
                                                     silence_color,
-                                                    click_marker_color,
                                                     window,
                                                 );
                                             },
@@ -1010,7 +1002,6 @@ fn paint_waveform(
     bounds: Bounds<Pixels>,
     waveform: Option<&[WaveformBucket]>,
     silence_ranges: Option<&[SilenceRange]>,
-    possible_click_timestamps: Option<&[Duration]>,
     duration: Option<Duration>,
     progress: f32,
     hover_progress: Option<f32>,
@@ -1019,7 +1010,6 @@ fn paint_waveform(
     unplayed_color: gpui::Hsla,
     hover_color: gpui::Hsla,
     silence_color: gpui::Hsla,
-    click_marker_color: gpui::Hsla,
     window: &mut Window,
 ) {
     let center_y = (bounds.top() + bounds.bottom()) / 2.;
@@ -1107,22 +1097,6 @@ fn paint_waveform(
                 bar.corner_radii = (1.).into();
                 window.paint_quad(bar);
             }
-        }
-    }
-
-    if let (Some(timestamps), Some(duration)) = (possible_click_timestamps, duration)
-        && !duration.is_zero()
-    {
-        for timestamp in timestamps {
-            let marker_progress = playback_progress((*timestamp).min(duration), duration);
-            let marker_x = (waveform_left + waveform_width * marker_progress).clamp(
-                waveform_left + px(1.),
-                waveform_left + waveform_width - px(1.),
-            );
-            window.paint_quad(fill(
-                Bounds::centered_at(point(marker_x, bounds.top() + px(8.)), size(px(2.), px(8.))),
-                click_marker_color,
-            ));
         }
     }
 
@@ -1309,18 +1283,7 @@ fn render_analysis_panel(
                         cx,
                     )),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(analysis_metric_card(
-                        "Possible clicks",
-                        metrics.possible_click_count.to_string(),
-                        "Possible discontinuities found from large isolated sample jumps, abrupt unfaded transitions around sustained regions below -50 dBFS, and abrupt non-silent file starts or ends that may click during standalone playback. This conservative TTS diagnostic can have false positives and negatives; the count may exceed the first 20 detections marked on the waveform.",
-                        cx,
-                    )),
-            )
+
             .into_any_element()
     } else {
         analysis_status("Analysis unavailable", cx)
