@@ -886,17 +886,24 @@ impl AutoUpdater {
         fetched_version: String,
         status: AutoUpdateStatus,
     ) -> Result<Option<Version>> {
-        let fetched_version = fetched_version.parse::<Version>()?;
+        let fetched_version = match fetched_version.parse::<Version>() {
+            Ok(fetched_version) => fetched_version,
+            Err(_) => {
+                let fetched_sha = fetched_version;
+                let current_sha = if let AutoUpdateStatus::Updated { version } = &status {
+                    version.build.as_str().rsplit('.').next()
+                } else {
+                    app_commit_sha.as_ref().ok().and_then(|sha| sha.as_deref())
+                };
+                if current_sha == Some(fetched_sha.as_str()) {
+                    return Ok(None);
+                }
 
-        if parsed_fetched_version.is_err() {
-            let should_download = app_commit_sha
-                .ok()
-                .flatten()
-                .is_none_or(|sha| sha != fetched_version);
-            return Ok(
-                should_download.then(|| VersionCheckType::Sha(AppCommitSha::new(fetched_version)))
-            );
-        }
+                let mut fetched_version = installed_version.clone();
+                fetched_version.build = semver::BuildMetadata::new(&fetched_sha)?;
+                return Ok(Some(fetched_version));
+            }
+        };
 
         match release_channel {
             ReleaseChannel::Nightly => {
@@ -1929,5 +1936,39 @@ mod tests {
             newer_version.unwrap(),
             Some(fetched_version.parse().unwrap())
         );
+    }
+
+    #[test]
+    fn test_audio_release_updates_for_a_new_commit_sha() {
+        let installed_version = semver::Version::new(1, 11, 3);
+
+        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
+            ReleaseChannel::Stable,
+            Ok(Some("oldsha".to_string())),
+            installed_version,
+            "newsha".to_string(),
+            AutoUpdateStatus::Idle,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(newer_version.to_string(), "1.11.3+newsha");
+    }
+
+    #[test]
+    fn test_audio_release_does_not_redownload_a_cached_commit_sha() {
+        let installed_version = semver::Version::new(1, 11, 3);
+
+        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
+            ReleaseChannel::Stable,
+            Ok(Some("oldsha".to_string())),
+            installed_version,
+            "newsha".to_string(),
+            AutoUpdateStatus::Updated {
+                version: "1.11.3+newsha".parse().unwrap(),
+            },
+        );
+
+        assert_eq!(newer_version.unwrap(), None);
     }
 }
