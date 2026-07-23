@@ -62,6 +62,7 @@ For ordinary fork maintenance, prefer lightweight local checks before pushing:
 ```sh
 cargo check -p audio_viewer
 cargo check -p project
+cargo check -p remote_server # when protocol, audio-store, or remote-server code changes
 rustfmt --check <touched-rust-files>
 git diff --check
 ```
