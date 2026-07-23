@@ -60,6 +60,10 @@ message Envelope {
 
     GetDefinition get_definition = 32;
     GetDefinitionResponse get_definition_response = 33;
+    GetEditPredictionDefinition get_edit_prediction_definition = 462;
+    GetEditPredictionDefinitionResponse get_edit_prediction_definition_response = 463;
+    GetEditPredictionTypeDefinition get_edit_prediction_type_definition = 464;
+    GetEditPredictionTypeDefinitionResponse get_edit_prediction_type_definition_response = 465; // current max
     GetDeclaration get_declaration = 237;
     GetDeclarationResponse get_declaration_response = 238;
     GetTypeDefinition get_type_definition = 34;
@@ -491,9 +495,9 @@ message Envelope {
     TelemetryEvent telemetry_event = 459;
     ResolveCodeAction resolve_code_action = 460;
     ResolveCodeActionResponse resolve_code_action_response = 461;
-    OpenAudioByPath open_audio_by_path = 462;
-    OpenAudioResponse open_audio_response = 463;
-    CreateAudioForPeer create_audio_for_peer = 464; // current max
+    OpenAudioByPath open_audio_by_path = 466;
+    OpenAudioResponse open_audio_response = 467;
+    CreateAudioForPeer create_audio_for_peer = 468; // current max
   }
 
   reserved 87 to 88;

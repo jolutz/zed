@@ -577,7 +577,7 @@ impl AudioStoreImpl for Entity<RemoteAudioStore> {
                 .request(proto::OpenAudioByPath {
                     project_id,
                     worktree_id,
-                    path: path.to_proto(),
+                    path: path.as_unix_str().to_owned(),
                 })
                 .await?;
 
