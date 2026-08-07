@@ -503,9 +503,13 @@ message Envelope {
     GitAddPathToGitInfoExclude git_add_path_to_git_info_exclude = 471;
     LoadCommitTemplate load_commit_template = 472;
     LoadCommitTemplateResponse load_commit_template_response = 473;
-    OpenAudioByPath open_audio_by_path = 474;
-    OpenAudioResponse open_audio_response = 475;
-    CreateAudioForPeer create_audio_for_peer = 476; // current max
+    RefreshDocumentColors refresh_document_colors = 474;
+    RefreshDocumentLinks refresh_document_links = 475;
+    RefreshFoldingRanges refresh_folding_ranges = 476;
+    RefreshDocumentSymbols refresh_document_symbols = 477;
+    OpenAudioByPath open_audio_by_path = 478;
+    OpenAudioResponse open_audio_response = 479;
+    CreateAudioForPeer create_audio_for_peer = 480; // current max
   }
 
   reserved 87 to 88;
