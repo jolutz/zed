@@ -1538,7 +1538,11 @@ impl Sidebar {
                 continue;
             }
 
-            let label = group_key.display_name(&path_detail_map);
+            let project_name = group_key.display_name(&path_detail_map);
+            let label = group_host
+                .as_ref()
+                .map(|host| SharedString::from(format!("{} · {project_name}", host.display_name())))
+                .unwrap_or(project_name);
 
             let is_collapsed = self.is_group_collapsed(group_key, cx);
             let should_load_threads = !is_collapsed || !query.is_empty();
@@ -1555,8 +1559,6 @@ impl Sidebar {
             let mut threads: Vec<Arc<ThreadEntry>> = Vec::new();
             let mut has_running_threads = false;
             let mut waiting_thread_count: usize = 0;
-            let group_host = group_key.host();
-
             if should_load_threads {
                 let thread_store = ThreadMetadataStore::global(cx);
 
