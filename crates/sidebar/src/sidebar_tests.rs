@@ -131,6 +131,7 @@ fn assert_remote_project_integration_sidebar_state(
     sidebar: &mut Sidebar,
     main_thread_id: &acp::SessionId,
     remote_thread_id: &acp::SessionId,
+    expected_project_label: &str,
 ) {
     let mut project_headers = sidebar.contents.entries.iter().filter_map(|entry| {
         if let ListEntry::ProjectHeader { label, .. } = entry {
@@ -141,15 +142,17 @@ fn assert_remote_project_integration_sidebar_state(
     });
 
     let Some(project_header) = project_headers.next() else {
-        panic!("expected exactly one sidebar project header named `project`, found none");
+        panic!(
+            "expected exactly one sidebar project header named `{expected_project_label}`, found none"
+        );
     };
     assert_eq!(
-        project_header, "project",
-        "expected the only sidebar project header to be `project`"
+        project_header, expected_project_label,
+        "expected the only sidebar project header to be `{expected_project_label}`"
     );
     if let Some(unexpected_header) = project_headers.next() {
         panic!(
-            "expected exactly one sidebar project header named `project`, found extra header `{unexpected_header}`"
+            "expected exactly one sidebar project header named `{expected_project_label}`, found extra header `{unexpected_header}`"
         );
     }
 
@@ -160,8 +163,8 @@ fn assert_remote_project_integration_sidebar_state(
             ListEntry::ProjectHeader { label, .. } => {
                 assert_eq!(
                     label.as_ref(),
-                    "project",
-                    "expected the only sidebar project header to be `project`"
+                    expected_project_label,
+                    "expected the only sidebar project header to be `{expected_project_label}`"
                 );
             }
             ListEntry::Thread(thread)
@@ -13264,6 +13267,7 @@ async fn test_remote_project_integration_does_not_briefly_render_as_separate_pro
     });
 
     let (original_opts, server_session, _) = remote::RemoteClient::fake_server(cx, server_cx);
+    let expected_project_label = format!("{} · project", original_opts.display_name());
 
     server_cx.update(remote_server::HeadlessProject::init);
     let server_executor = server_cx.executor();
@@ -13391,6 +13395,7 @@ async fn test_remote_project_integration_does_not_briefly_render_as_separate_pro
 
     let saw_separate_project_header = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let saw_separate_project_header_for_observer = saw_separate_project_header.clone();
+    let expected_project_label_for_observer = expected_project_label.clone();
 
     sidebar
         .update(cx, |_, cx| {
@@ -13409,7 +13414,9 @@ async fn test_remote_project_integration_does_not_briefly_render_as_separate_pro
                     return;
                 };
 
-                if project_header != "project" || project_headers.next().is_some() {
+                if project_header != expected_project_label_for_observer
+                    || project_headers.next().is_some()
+                {
                     saw_separate_project_header_for_observer
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -13508,6 +13515,7 @@ async fn test_remote_project_integration_does_not_briefly_render_as_separate_pro
             sidebar,
             &main_thread_id,
             &remote_thread_id,
+            &expected_project_label,
         );
     });
 
