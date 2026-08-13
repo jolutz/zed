@@ -35,6 +35,15 @@ Remote SSH behavior matters: audio bytes may be read on the remote host, but
 playback should happen on the local Zed client. Model this after the image
 viewer's local/remote store flow.
 
+## Remote Host Labels
+
+The Threads Sidebar includes the remote hostname in each remote project header,
+using the format `host · project`. This distinguishes projects that have the
+same folder name but run on different SSH hosts or other remote environments.
+Local project headers continue to show only the project name.
+
+The implementation and its integration tests are in `crates/sidebar`.
+
 ## Build And Distribution
 
 GitHub Actions should do the heavy bundle build. The local machine should usually

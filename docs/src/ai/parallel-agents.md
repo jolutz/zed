@@ -13,7 +13,7 @@ Use **Panel Layout > Agentic** from the user menu in the title bar (or the {#act
 
 ## Threads Sidebar {#threads-sidebar}
 
-The sidebar shows your threads grouped by project. Each project gets its own section with a header. Threads appear below with their title, status indicator, and which agent is running them. Threads running in linked Git worktrees appear under the same project as their main worktree. See [Worktree Isolation](#worktree-isolation).
+The sidebar shows your threads grouped by project. Each project gets its own section with a header. For remote projects, the header includes the remote hostname in the format `host · project`; local project headers show only the project name. This helps distinguish projects with the same folder name on different hosts. Threads appear below with their title, status indicator, and which agent is running them. Threads running in linked Git worktrees appear under the same project as their main worktree. See [Worktree Isolation](#worktree-isolation).
 
 Terminal Threads also appear as entries in the sidebar alongside agent threads, identified by a terminal icon. Click one to switch to it.
 

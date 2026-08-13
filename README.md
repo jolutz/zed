@@ -5,6 +5,19 @@
 
 Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
 
+### About This Fork
+
+The `audio-file-viewer` branch is a Linux-focused Zed build with these additional
+features:
+
+- An audio viewer for `wav`, `mp3`, `flac`, and `ogg` files, including files in
+  remote projects. Audio is played on the local computer.
+- Remote hostnames in Threads Sidebar project headers. Remote projects use the
+  format `host · project`, which makes projects with the same folder name easier
+  to distinguish. Local project headers are unchanged.
+
+See [FORK.md](./FORK.md) for build, installation, and maintenance details.
+
 ---
 
 ### Installation

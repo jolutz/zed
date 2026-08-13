@@ -47,6 +47,9 @@ impl std::error::Error for MissingDependencyError {}
 const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const REMOTE_SERVER_CACHE_LIMIT: usize = 5;
+const AUDIO_ZED_LINUX_RELEASE_TAG: &str = "audio-zed-linux-latest";
+const AUDIO_ZED_LINUX_RELEASE_URL: &str =
+    "https://github.com/jolutz/zed/releases/download/audio-zed-linux-latest";
 
 #[cfg(target_os = "linux")]
 fn linux_rsync_install_hint() -> &'static str {
@@ -187,6 +190,11 @@ pub struct AutoUpdater {
 pub struct ReleaseAsset {
     pub version: String,
     pub url: String,
+}
+
+#[derive(Deserialize)]
+struct GithubRelease {
+    target_commitish: String,
 }
 
 struct MacOsUnmounter<'a> {
@@ -577,16 +585,9 @@ impl AutoUpdater {
         })?;
 
         set_status("Fetching remote server release", cx);
-        let release = Self::get_release_asset(
-            &this,
-            release_channel,
-            version,
-            "zed-remote-server",
-            os,
-            arch,
-            cx,
-        )
-        .await?;
+        let release =
+            Self::get_remote_server_release_asset(&this, release_channel, version, os, arch, cx)
+                .await?;
 
         let servers_dir = paths::remote_servers_dir();
         let channel_dir = servers_dir.join(release_channel.dev_name());
@@ -633,10 +634,62 @@ impl AutoUpdater {
         })?;
 
         let release =
-            Self::get_release_asset(&this, channel, version, "zed-remote-server", os, arch, cx)
-                .await?;
+            Self::get_remote_server_release_asset(&this, channel, version, os, arch, cx).await?;
 
         Ok(Some(release.url))
+    }
+
+    async fn get_remote_server_release_asset(
+        this: &Entity<Self>,
+        release_channel: ReleaseChannel,
+        version: Option<Version>,
+        os: &str,
+        arch: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<ReleaseAsset> {
+        if os == "linux" && arch == "x86_64" {
+            let version = cx.update(|cx| {
+                AppCommitSha::try_global(cx)
+                    .map(|sha| sha.full())
+                    .unwrap_or_else(|| AUDIO_ZED_LINUX_RELEASE_TAG.to_string())
+            });
+
+            return Ok(ReleaseAsset {
+                version,
+                url: format!("{AUDIO_ZED_LINUX_RELEASE_URL}/zed-remote-server-linux-x86_64.gz"),
+            });
+        }
+
+        Self::get_release_asset(
+            this,
+            release_channel,
+            version,
+            "zed-remote-server",
+            os,
+            arch,
+            cx,
+        )
+        .await
+    }
+
+    async fn get_application_release_asset(
+        this: &Entity<Self>,
+        release_channel: ReleaseChannel,
+        version: Option<Version>,
+        os: &str,
+        arch: &str,
+        cx: &mut AsyncApp,
+    ) -> Result<ReleaseAsset> {
+        if os == "linux" && arch == "x86_64" {
+            let client = this.read_with(cx, |this, _| this.client.http_client());
+            let version = fetch_audio_zed_linux_release_version(client).await?;
+            return Ok(ReleaseAsset {
+                version,
+                url: format!("{AUDIO_ZED_LINUX_RELEASE_URL}/zed-linux-x86_64.tar.gz"),
+            });
+        }
+
+        Self::get_release_asset(this, release_channel, version, "zed", os, arch, cx).await
     }
 
     async fn get_release_asset(
@@ -722,7 +775,7 @@ impl AutoUpdater {
         });
 
         let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
+            Self::get_application_release_asset(&this, release_channel, None, OS, ARCH, cx).await?;
         let fetched_version = fetched_release_data.clone().version;
         let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
         let newer_version = Self::check_if_fetched_version_is_newer(
@@ -833,7 +886,24 @@ impl AutoUpdater {
         fetched_version: String,
         status: AutoUpdateStatus,
     ) -> Result<Option<Version>> {
-        let fetched_version = fetched_version.parse::<Version>()?;
+        let fetched_version = match fetched_version.parse::<Version>() {
+            Ok(fetched_version) => fetched_version,
+            Err(_) => {
+                let fetched_sha = fetched_version;
+                let current_sha = if let AutoUpdateStatus::Updated { version } = &status {
+                    version.build.as_str().rsplit('.').next()
+                } else {
+                    app_commit_sha.as_ref().ok().and_then(|sha| sha.as_deref())
+                };
+                if current_sha == Some(fetched_sha.as_str()) {
+                    return Ok(None);
+                }
+
+                let mut fetched_version = installed_version.clone();
+                fetched_version.build = semver::BuildMetadata::new(&fetched_sha)?;
+                return Ok(Some(fetched_version));
+            }
+        };
 
         match release_channel {
             ReleaseChannel::Nightly => {
@@ -955,6 +1025,30 @@ impl AutoUpdater {
             Ok(kvp.read_kvp(SHOULD_SHOW_UPDATE_NOTIFICATION_KEY)?.is_some())
         })
     }
+}
+
+async fn fetch_audio_zed_linux_release_version(client: Arc<HttpClientWithUrl>) -> Result<String> {
+    let url = format!(
+        "https://api.github.com/repos/jolutz/zed/releases/tags/{AUDIO_ZED_LINUX_RELEASE_TAG}"
+    );
+    let mut response = client.get(&url, Default::default(), true).await?;
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await?;
+
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to fetch audio Zed release: {:?}",
+        String::from_utf8_lossy(&body),
+    );
+
+    let release: GithubRelease = serde_json::from_slice(body.as_slice()).with_context(|| {
+        format!(
+            "error deserializing audio Zed release {:?}",
+            String::from_utf8_lossy(&body),
+        )
+    })?;
+
+    Ok(release.target_commitish)
 }
 
 async fn download_remote_server_binary(
@@ -1842,5 +1936,39 @@ mod tests {
             newer_version.unwrap(),
             Some(fetched_version.parse().unwrap())
         );
+    }
+
+    #[test]
+    fn test_audio_release_updates_for_a_new_commit_sha() {
+        let installed_version = semver::Version::new(1, 15, 0);
+
+        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
+            ReleaseChannel::Stable,
+            Ok(Some("oldsha".to_string())),
+            installed_version,
+            "newsha".to_string(),
+            AutoUpdateStatus::Idle,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(newer_version.to_string(), "1.15.0+newsha");
+    }
+
+    #[test]
+    fn test_audio_release_does_not_redownload_a_cached_commit_sha() {
+        let installed_version = semver::Version::new(1, 15, 0);
+
+        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
+            ReleaseChannel::Stable,
+            Ok(Some("oldsha".to_string())),
+            installed_version,
+            "newsha".to_string(),
+            AutoUpdateStatus::Updated {
+                version: "1.15.0+newsha".parse().unwrap(),
+            },
+        );
+
+        assert_eq!(newer_version.unwrap(), None);
     }
 }
