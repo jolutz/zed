@@ -507,9 +507,11 @@ message Envelope {
     RefreshDocumentLinks refresh_document_links = 475;
     RefreshFoldingRanges refresh_folding_ranges = 476;
     RefreshDocumentSymbols refresh_document_symbols = 477;
-    OpenAudioByPath open_audio_by_path = 478;
-    OpenAudioResponse open_audio_response = 479;
-    CreateAudioForPeer create_audio_for_peer = 480; // current max
+    BlameBufferAtRevision blame_buffer_at_revision = 478;
+    BlameBufferAtRevisionResponse blame_buffer_at_revision_response = 479;
+    OpenAudioByPath open_audio_by_path = 480;
+    OpenAudioResponse open_audio_response = 481;
+    CreateAudioForPeer create_audio_for_peer = 482; // current max
   }
 
   reserved 87 to 88;
