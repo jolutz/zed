@@ -6,6 +6,10 @@ on:
     branches:
       - audio-file-viewer
 
+concurrency:
+  group: build-audio-zed-linux-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -39,11 +43,18 @@ jobs:
       - name: Build Linux bundle
         run: ./script/bundle-linux
 
+      - name: Verify bundle outputs
+        run: |
+          test -s target/release/zed-linux-x86_64.tar.gz
+          test -s target/zed-remote-server-linux-x86_64.gz
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: zed-linux-x86_64.tar.gz
-          path: target/release/zed-linux-x86_64.tar.gz
+          name: audio-zed-linux-x86_64
+          path: |
+            target/release/zed-linux-x86_64.tar.gz
+            target/zed-remote-server-linux-x86_64.gz
           if-no-files-found: error
 
       - name: Publish latest custom build
@@ -52,7 +63,8 @@ jobs:
         run: |
           set -euo pipefail
           release_tag="audio-zed-linux-latest"
-          asset="target/release/zed-linux-x86_64.tar.gz"
+          app_asset="target/release/zed-linux-x86_64.tar.gz"
+          remote_server_asset="target/zed-remote-server-linux-x86_64.gz"
 
           if ! gh release view "$release_tag" >/dev/null 2>&1; then
             gh release create "$release_tag" \
@@ -64,4 +76,27 @@ jobs:
             gh release edit "$release_tag" --target "$GITHUB_SHA"
           fi
 
-          gh release upload "$release_tag" "$asset" --clobber
+          gh release upload "$release_tag" \
+            "$app_asset" \
+            "$remote_server_asset" \
+            --clobber
+
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_tag="audio-zed-linux-latest"
+          actual_target="$(gh release view "$release_tag" --json targetCommitish --jq '.targetCommitish')"
+          test "$actual_target" = "$GITHUB_SHA"
+
+          for asset in \
+            target/release/zed-linux-x86_64.tar.gz \
+            target/zed-remote-server-linux-x86_64.gz
+          do
+            asset_name="$(basename "$asset")"
+            local_digest="sha256:$(sha256sum "$asset" | cut -d ' ' -f 1)"
+            release_digest="$(gh release view "$release_tag" --json assets --jq ".assets[] | select(.name == \"$asset_name\") | .digest")"
+            test -n "$release_digest"
+            test "$release_digest" = "$local_digest"
+          done

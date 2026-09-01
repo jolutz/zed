@@ -53,9 +53,14 @@ Custom distribution path:
 
 - Workflow: `.github/workflows/build_audio_zed_linux.yml`
 - Release tag: `audio-zed-linux-latest`
-- Release asset: `zed-linux-x86_64.tar.gz`
+- Release assets: `zed-linux-x86_64.tar.gz` and
+  `zed-remote-server-linux-x86_64.gz`
 - Installer/update script: `script/install-audio-zed-linux`
 - Local launcher installed by that script: `~/.local/bin/zed-audio`
+
+The client and remote-server assets must be rebuilt and published together from
+the same commit. The audio viewer adds remote protocol messages, so a stale
+remote server can misinterpret a request and terminate the remote session.
 
 The installer script must stay executable in Git (`100755`). If a user has to run
 `chmod +x script/install-audio-zed-linux`, fix the Git mode with:
@@ -83,6 +88,9 @@ affect CI, distribution, or installation:
 gh run list --repo jolutz/zed --branch audio-file-viewer --limit 5
 gh release view audio-zed-linux-latest --repo jolutz/zed
 ```
+
+Confirm the release targets the pushed commit and that both assets have fresh
+digests from the same successful workflow run.
 
 ## Automation
 
