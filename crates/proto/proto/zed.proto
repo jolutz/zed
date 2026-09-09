@@ -509,9 +509,18 @@ message Envelope {
     RefreshDocumentSymbols refresh_document_symbols = 477;
     BlameBufferAtRevision blame_buffer_at_revision = 478;
     BlameBufferAtRevisionResponse blame_buffer_at_revision_response = 479;
-    OpenAudioByPath open_audio_by_path = 480;
-    OpenAudioResponse open_audio_response = 481;
-    CreateAudioForPeer create_audio_for_peer = 482; // current max
+    GetFilePermalink get_file_permalink = 480;
+    GetFilePermalinkResponse get_file_permalink_response = 481;
+
+    PrepareCallHierarchy prepare_call_hierarchy = 482;
+    PrepareCallHierarchyResponse prepare_call_hierarchy_response = 483;
+    GetIncomingCalls get_incoming_calls = 484;
+    GetIncomingCallsResponse get_incoming_calls_response = 485;
+    GetOutgoingCalls get_outgoing_calls = 486;
+    GetOutgoingCallsResponse get_outgoing_calls_response = 487;
+    OpenAudioByPath open_audio_by_path = 488;
+    OpenAudioResponse open_audio_response = 489;
+    CreateAudioForPeer create_audio_for_peer = 490; // current max
   }
 
   reserved 87 to 88;
