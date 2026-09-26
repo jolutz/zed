@@ -51,6 +51,7 @@ pub struct AudioItem {
     pub file: Arc<worktree::File>,
     pub bytes: Arc<Vec<u8>>,
     reload_task: Option<Task<()>>,
+    reload_generation: u64,
 }
 
 impl AudioItem {
@@ -60,6 +61,7 @@ impl AudioItem {
             file,
             bytes: Arc::new(bytes),
             reload_task: None,
+            reload_generation: 0,
         }
     }
 
@@ -75,28 +77,29 @@ impl AudioItem {
     }
 
     fn file_updated(&mut self, new_file: Arc<worktree::File>, cx: &mut Context<Self>) {
-        let mut file_changed = false;
-
-        let old_file = &self.file;
-        if new_file.path() != old_file.path() {
-            file_changed = true;
+        let reload_needed = matches!(new_file.disk_state(), DiskState::Present { .. })
+            && (self.file.disk_state() != new_file.disk_state()
+                || self.file.entry_id != new_file.entry_id
+                || self.file.path != new_file.path);
+        let file_changed = *self.file != *new_file;
+        if !file_changed {
+            return;
         }
-
-        let old_state = old_file.disk_state();
-        let new_state = new_file.disk_state();
-        if old_state != new_state {
-            file_changed = true;
-            if matches!(new_state, DiskState::Present { .. }) {
-                cx.emit(AudioItemEvent::ReloadNeeded);
-                self.reload(cx);
-            }
-        }
-
         self.file = new_file;
+        if reload_needed {
+            cx.emit(AudioItemEvent::ReloadNeeded);
+        }
         if file_changed {
             cx.emit(AudioItemEvent::FileHandleChanged);
             cx.notify();
         }
+    }
+
+    fn is_current_reload(&self, file: &worktree::File, generation: u64) -> bool {
+        self.reload_generation == generation
+            && self.file.path == file.path
+            && self.file.entry_id == file.entry_id
+            && self.file.disk_state == file.disk_state
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) -> Option<oneshot::Receiver<()>> {
@@ -198,8 +201,8 @@ struct RemoteAudioStore {
     upstream_client: AnyProtoClient,
     project_id: u64,
     loading_remote_audios_by_id: HashMap<AudioId, LoadingRemoteAudio>,
-    remote_audio_listeners: HashMap<AudioId, Vec<oneshot::Sender<Result<Entity<AudioItem>>>>>,
-    loaded_audios: HashMap<AudioId, Entity<AudioItem>>,
+    remote_audio_listeners: HashMap<AudioId, oneshot::Sender<Result<LoadedBinaryFile>>>,
+    loaded_audios: HashMap<AudioId, Result<LoadedBinaryFile>>,
 }
 
 struct LoadingRemoteAudio {
@@ -261,6 +264,12 @@ impl AudioStore {
         project_id: u64,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.subscribe(&worktree_store, |this, _, event, cx| {
+            if let WorktreeStoreEvent::WorktreeUpdatedEntries(worktree_id, changes) = event {
+                this.remote_worktree_entries_changed(*worktree_id, changes, cx);
+            }
+        })
+        .detach();
         Self {
             state: Box::new(cx.new(|_| RemoteAudioStore {
                 upstream_client,
@@ -379,6 +388,59 @@ impl AudioStore {
         }
     }
 
+    fn remote_worktree_entries_changed(
+        &mut self,
+        worktree_id: WorktreeId,
+        changes: &[(Arc<RelPath>, ProjectEntryId, PathChange)],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self
+            .worktree_store
+            .read(cx)
+            .worktree_for_id(worktree_id, cx)
+        else {
+            return;
+        };
+        let snapshot = worktree.read(cx).snapshot();
+        for audio in self.audios().collect::<Vec<_>>() {
+            audio.update(cx, |audio, cx| {
+                let old_file = &audio.file;
+                if old_file.worktree_id(cx) != worktree_id
+                    || !changes.iter().any(|(path, id, _)| {
+                        old_file.entry_id == Some(*id) || old_file.path == *path
+                    })
+                {
+                    return;
+                }
+                let entry = old_file
+                    .entry_id
+                    .and_then(|id| snapshot.entry_for_id(id))
+                    .or_else(|| snapshot.entry_for_path(old_file.path.as_ref()));
+                let file = if let Some(entry) = entry {
+                    worktree::File {
+                        disk_state: entry
+                            .mtime
+                            .map(|mtime| DiskState::Present {
+                                mtime,
+                                size: entry.size,
+                            })
+                            .unwrap_or(old_file.disk_state),
+                        entry_id: Some(entry.id),
+                        path: entry.path.clone(),
+                        is_private: entry.is_private,
+                        ..(**old_file).clone()
+                    }
+                } else {
+                    worktree::File {
+                        disk_state: DiskState::Deleted,
+                        ..(**old_file).clone()
+                    }
+                };
+                audio.file_updated(Arc::new(file), cx);
+            });
+        }
+    }
+
     pub fn handle_create_audio_for_peer(
         &mut self,
         envelope: TypedEnvelope<proto::CreateAudioForPeer>,
@@ -386,117 +448,125 @@ impl AudioStore {
     ) -> Result<()> {
         if let Some(remote) = self.state.as_remote() {
             let worktree_store = self.worktree_store.clone();
-            let audio = remote.update(cx, |remote, cx| {
+            remote.update(cx, |remote, cx| {
                 remote.handle_create_audio_for_peer(envelope, &worktree_store, cx)
             })?;
-            if let Some(audio) = audio {
-                remote.update(cx, |this, cx| {
-                    let audio = audio.clone();
-                    let audio_id = audio.read(cx).id;
-                    this.loaded_audios.insert(audio_id, audio)
-                });
-
-                self.add_audio(audio, cx)?;
-            }
         }
-
         Ok(())
     }
 }
 
 impl RemoteAudioStore {
-    pub fn wait_for_remote_audio(
+    fn load_file(
+        &mut self,
+        path: Arc<RelPath>,
+        worktree_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(AudioId, LoadedBinaryFile)>> {
+        let request = self.upstream_client.request(proto::OpenAudioByPath {
+            project_id: self.project_id,
+            worktree_id: worktree_id.to_proto(),
+            path: path.as_unix_str().to_owned(),
+        });
+        cx.spawn(async move |this, cx| {
+            let response = request.await?;
+            let id = AudioId::from(
+                NonZeroU64::new(response.audio_id).context("invalid remote audio id")?,
+            );
+            let file = this
+                .update(cx, |this, cx| this.wait_for_remote_file(id, cx))?
+                .await?;
+            Ok((id, file))
+        })
+    }
+
+    fn wait_for_remote_file(
         &mut self,
         id: AudioId,
         cx: &mut Context<Self>,
-    ) -> Task<Result<Entity<AudioItem>>> {
-        if let Some(audio) = self.loaded_audios.remove(&id) {
-            return Task::ready(Ok(audio));
+    ) -> Task<Result<LoadedBinaryFile>> {
+        if let Some(file) = self.loaded_audios.remove(&id) {
+            return Task::ready(file);
         }
-
         let (tx, rx) = oneshot::channel();
-        self.remote_audio_listeners.entry(id).or_default().push(tx);
-
-        cx.spawn(async move |_this, cx| cx.background_spawn(async move { rx.await? }).await)
+        self.remote_audio_listeners.insert(id, tx);
+        cx.spawn(async move |_, _| rx.await?)
     }
 
-    pub fn handle_create_audio_for_peer(
+    fn handle_create_audio_for_peer(
         &mut self,
         envelope: TypedEnvelope<proto::CreateAudioForPeer>,
         worktree_store: &Entity<WorktreeStore>,
         cx: &mut Context<Self>,
-    ) -> Result<Option<Entity<AudioItem>>> {
+    ) -> Result<()> {
         use proto::create_audio_for_peer::Variant;
-        match envelope.payload.variant {
+        let id = match envelope.payload.variant {
             Some(Variant::State(state)) => {
-                let audio_id =
-                    AudioId::from(NonZeroU64::new(state.id).context("invalid audio id")?);
-
+                let id = AudioId::from(NonZeroU64::new(state.id).context("invalid audio id")?);
                 self.loading_remote_audios_by_id.insert(
-                    audio_id,
+                    id,
                     LoadingRemoteAudio {
                         state,
                         chunks: Vec::new(),
                         received_size: 0,
                     },
                 );
-                Ok(None)
+                id
             }
             Some(Variant::Chunk(chunk)) => {
-                let audio_id =
+                let id =
                     AudioId::from(NonZeroU64::new(chunk.audio_id).context("invalid audio id")?);
-
                 let loading = self
                     .loading_remote_audios_by_id
-                    .get_mut(&audio_id)
+                    .get_mut(&id)
                     .context("received chunk for unknown audio")?;
-
                 loading.received_size += chunk.data.len() as u64;
                 loading.chunks.push(chunk.data);
-
-                if loading.received_size == loading.state.content_size {
-                    let loading = self
-                        .loading_remote_audios_by_id
-                        .remove(&audio_id)
-                        .context("audio load disappeared before completion")?;
-
-                    let mut content = Vec::with_capacity(loading.received_size as usize);
-                    for chunk_data in loading.chunks {
-                        content.extend_from_slice(&chunk_data);
-                    }
-
-                    let proto_file = loading.state.file.context("missing file in audio state")?;
-                    let worktree_id = WorktreeId::from_proto(proto_file.worktree_id);
-                    let worktree = worktree_store
-                        .read(cx)
-                        .worktree_for_id(worktree_id, cx)
-                        .context("worktree not found")?;
-
-                    let file = Arc::new(
-                        worktree::File::from_proto(proto_file, worktree, cx)
-                            .context("invalid file in audio state")?,
-                    );
-
-                    let entity = cx.new(|_cx| AudioItem::new(audio_id, file, content));
-
-                    if let Some(listeners) = self.remote_audio_listeners.remove(&audio_id) {
-                        for listener in listeners {
-                            if listener.send(Ok(entity.clone())).is_err() {
-                                log::debug!("Remote audio listener was dropped");
-                            }
-                        }
-                    }
-
-                    Ok(Some(entity))
-                } else {
-                    Ok(None)
-                }
+                id
             }
-            None => {
-                log::warn!("Received CreateAudioForPeer with no variant");
-                Ok(None)
-            }
+            None => anyhow::bail!("Received CreateAudioForPeer with no variant"),
+        };
+
+        let loading = self
+            .loading_remote_audios_by_id
+            .get(&id)
+            .context("audio transfer disappeared")?;
+        if loading.received_size < loading.state.content_size {
+            return Ok(());
         }
+        let loading = self
+            .loading_remote_audios_by_id
+            .remove(&id)
+            .context("audio transfer disappeared")?;
+        let result = (|| {
+            anyhow::ensure!(
+                loading.received_size == loading.state.content_size,
+                "Received too much audio data"
+            );
+            let proto_file = loading.state.file.context("missing file in audio state")?;
+            let worktree_id = WorktreeId::from_proto(proto_file.worktree_id);
+            let worktree = worktree_store
+                .read(cx)
+                .worktree_for_id(worktree_id, cx)
+                .context("worktree not found")?;
+            let file = Arc::new(
+                worktree::File::from_proto(proto_file, worktree, cx)
+                    .context("invalid file in audio state")?,
+            );
+            let mut content = Vec::with_capacity(loading.received_size as usize);
+            for chunk in loading.chunks {
+                content.extend_from_slice(&chunk);
+            }
+            Ok(LoadedBinaryFile { file, content })
+        })();
+        if let Some(listener) = self.remote_audio_listeners.remove(&id) {
+            if listener.send(result).is_err() {
+                log::debug!("Remote audio listener was dropped");
+            }
+        } else {
+            self.loaded_audios.insert(id, result);
+        }
+        Ok(())
     }
 }
 
@@ -525,6 +595,9 @@ impl AudioStoreImpl for Entity<LocalAudioStore> {
             audio_store.update(cx, |audio_store, cx| {
                 audio_store.add_audio(entity.clone(), cx)
             })??;
+            this.update(cx, |this, cx| {
+                this.audio_changed_file(entity.clone(), cx);
+            });
 
             Ok(entity)
         })
@@ -565,42 +638,59 @@ impl AudioStoreImpl for Entity<RemoteAudioStore> {
         worktree: Entity<Worktree>,
         cx: &mut Context<AudioStore>,
     ) -> Task<Result<Entity<AudioItem>>> {
-        let worktree_id = worktree.read(cx).id().to_proto();
-        let (project_id, client) = {
-            let store = self.read(cx);
-            (store.project_id, store.upstream_client.clone())
-        };
-        let remote_store = self.clone();
-
-        cx.spawn(async move |_audio_store, cx| {
-            let response = client
-                .request(proto::OpenAudioByPath {
-                    project_id,
-                    worktree_id,
-                    path: path.as_unix_str().to_owned(),
-                })
-                .await?;
-
-            let audio_id = AudioId::from(
-                NonZeroU64::new(response.audio_id).context("invalid audio_id in response")?,
-            );
-
-            remote_store
-                .update(cx, |remote_store, cx| {
-                    remote_store.wait_for_remote_audio(audio_id, cx)
-                })
-                .await
+        let worktree_id = worktree.read(cx).id();
+        let load = self.update(cx, |this, cx| this.load_file(path, worktree_id, cx));
+        cx.spawn(async move |store, cx| {
+            let (id, LoadedBinaryFile { file, content }) = load.await?;
+            let entity = cx.new(|_| AudioItem::new(id, file, content));
+            store.update(cx, |store, cx| store.add_audio(entity.clone(), cx))??;
+            Ok(entity)
         })
     }
 
     fn reload_audios(
         &self,
-        _audios: HashSet<Entity<AudioItem>>,
-        _cx: &mut Context<AudioStore>,
+        audios: HashSet<Entity<AudioItem>>,
+        cx: &mut Context<AudioStore>,
     ) -> Task<Result<()>> {
-        Task::ready(Err(anyhow::anyhow!(
-            "Reloading audio from remote is not supported"
-        )))
+        let mut reloads = Vec::new();
+        for audio in audios {
+            let (file, generation) = audio.update(cx, |audio, _| {
+                audio.reload_generation += 1;
+                (audio.file.clone(), audio.reload_generation)
+            });
+            let worktree_id = file.worktree_id(cx);
+            let load = self.update(cx, |this, cx| {
+                this.load_file(file.path.clone(), worktree_id, cx)
+            });
+            let audio = audio.downgrade();
+            reloads.push(cx.spawn(async move |_, cx| {
+                let loaded = load.await;
+                let current = audio
+                    .read_with(cx, |audio, _| audio.is_current_reload(&file, generation))
+                    .unwrap_or(false);
+                if !current {
+                    return Ok(());
+                }
+                let (_, loaded) = loaded?;
+                let bytes = Arc::new(loaded.content);
+                audio.update(cx, |audio, cx| {
+                    if audio.is_current_reload(&file, generation) {
+                        audio.bytes = bytes;
+                        cx.emit(AudioItemEvent::Reloaded);
+                        cx.notify();
+                    }
+                })?;
+                anyhow::Ok(())
+            }));
+        }
+        cx.spawn(async move |_, _| {
+            let results = futures::future::join_all(reloads).await;
+            for result in results {
+                result?;
+            }
+            Ok(())
+        })
     }
 
     fn as_local(&self) -> Option<Entity<LocalAudioStore>> {

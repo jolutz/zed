@@ -2482,6 +2482,219 @@ async fn test_remote_cancel_language_server_work(
     }
 }
 
+#[gpui::test(iterations = 5)]
+async fn test_remote_audio_reload(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(path!("/media"), json!({})).await;
+    let path = Path::new(path!("/media/audio.wav"));
+    let initial = vec![1; 2 * 1024 * 1024 + 17];
+    fs.insert_file(path, initial.clone()).await;
+
+    let (project, _headless) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/media"), true, cx)
+        })
+        .await
+        .unwrap();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+    let audio = project
+        .update(cx, |project, cx| {
+            project.open_audio((worktree_id, rel_path("audio.wav")), cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| assert_eq!(audio.bytes.as_slice(), initial));
+
+    fs.save(path, &"overwrite".into(), LineEnding::Unix)
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| {
+        assert_eq!(audio.bytes.as_slice(), b"overwrite")
+    });
+
+    let replacement = vec![2; 2 * 1024 * 1024 + 31];
+    fs.insert_file(path!("/media/temporary"), replacement.clone())
+        .await;
+    fs.rename(
+        Path::new(path!("/media/temporary")),
+        path,
+        fs::RenameOptions {
+            overwrite: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| {
+        assert_eq!(audio.bytes.as_slice(), replacement)
+    });
+
+    fs.insert_file(path, vec![3; 1024 * 1024 + 3]).await;
+    cx.executor().simulate_random_delay().await;
+    fs.insert_file(path, vec![4; 1024 * 1024 + 4]).await;
+    cx.executor().simulate_random_delay().await;
+    fs.insert_file(path, vec![5; 1024 * 1024 + 5]).await;
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| {
+        assert_eq!(audio.bytes.as_slice(), vec![5; 1024 * 1024 + 5])
+    });
+
+    let renamed = Path::new(path!("/media/renamed.wav"));
+    fs.rename(path, renamed, Default::default()).await.unwrap();
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| {
+        assert_eq!(audio.file.path.as_ref(), rel_path("renamed.wav"))
+    });
+    fs.insert_file(renamed, b"after rename".to_vec()).await;
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| {
+        assert_eq!(audio.bytes.as_slice(), b"after rename")
+    });
+
+    fs.remove_file(renamed, Default::default()).await.unwrap();
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| assert!(audio.file.disk_state.is_deleted()));
+    fs.insert_file(renamed, Vec::new()).await;
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| {
+        assert!(!audio.file.disk_state.is_deleted());
+        assert!(audio.bytes.is_empty());
+    });
+    fs.insert_file(renamed, b"recreated".to_vec()).await;
+    cx.run_until_parked();
+    audio.read_with(cx, |audio, _| {
+        assert_eq!(audio.bytes.as_slice(), b"recreated")
+    });
+    let reopened = project
+        .update(cx, |project, cx| {
+            project.open_audio((worktree_id, rel_path("renamed.wav")), cx)
+        })
+        .await
+        .unwrap();
+    assert_eq!(audio, reopened);
+
+    fs.insert_file(path!("/media/empty.wav"), Vec::new()).await;
+    let empty = project
+        .update(cx, |project, cx| {
+            project.open_audio((worktree_id, rel_path("empty.wav")), cx)
+        })
+        .await
+        .unwrap();
+    empty.read_with(cx, |audio, _| assert!(audio.bytes.is_empty()));
+}
+
+fn media_test_png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba(color));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+
+#[gpui::test(iterations = 5)]
+async fn test_remote_image_reload(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(path!("/media"), json!({})).await;
+    let path = Path::new(path!("/media/image.png"));
+    fs.insert_file(path, media_test_png(2, 3, [255, 0, 0, 255]))
+        .await;
+
+    let (project, _headless) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/media"), true, cx)
+        })
+        .await
+        .unwrap();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+    let image = project
+        .update(cx, |project, cx| {
+            project.open_image((worktree_id, rel_path("image.png")), cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let original = image.read_with(cx, |image, _| image.image.clone());
+
+    let replacement = media_test_png(4, 5, [0, 255, 0, 255]);
+    fs.insert_file(path!("/media/temporary"), replacement.clone())
+        .await;
+    fs.rename(
+        Path::new(path!("/media/temporary")),
+        path,
+        fs::RenameOptions {
+            overwrite: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    cx.run_until_parked();
+    image.read_with(cx, |image, _| {
+        assert!(!Arc::ptr_eq(&image.image, &original));
+        let metadata = image.image_metadata.unwrap();
+        assert_eq!((metadata.width, metadata.height), (4, 5));
+        assert_eq!(metadata.file_size, replacement.len() as u64);
+    });
+
+    let valid_image = image.read_with(cx, |image, _| image.image.clone());
+    fs.insert_file(path, b"incomplete image".to_vec()).await;
+    cx.run_until_parked();
+    image.read_with(cx, |image, _| {
+        assert!(Arc::ptr_eq(&image.image, &valid_image))
+    });
+
+    fs.insert_file(path, media_test_png(6, 7, [0, 0, 255, 255]))
+        .await;
+    fs.insert_file(path, media_test_png(8, 9, [255, 255, 0, 255]))
+        .await;
+    cx.run_until_parked();
+    image.read_with(cx, |image, _| {
+        let metadata = image.image_metadata.unwrap();
+        assert_eq!((metadata.width, metadata.height), (8, 9));
+    });
+
+    let renamed = Path::new(path!("/media/renamed.png"));
+    fs.rename(path, renamed, Default::default()).await.unwrap();
+    cx.run_until_parked();
+    image.read_with(cx, |image, _| {
+        assert_eq!(image.file.path.as_ref(), rel_path("renamed.png"))
+    });
+    fs.remove_file(renamed, Default::default()).await.unwrap();
+    cx.run_until_parked();
+    image.read_with(cx, |image, _| assert!(image.file.disk_state.is_deleted()));
+    fs.insert_file(renamed, media_test_png(10, 11, [0, 0, 0, 255]))
+        .await;
+    cx.run_until_parked();
+    image.read_with(cx, |image, _| {
+        assert!(!image.file.disk_state.is_deleted());
+        let metadata = image.image_metadata.unwrap();
+        assert_eq!((metadata.width, metadata.height), (10, 11));
+    });
+    let reopened = project
+        .update(cx, |project, cx| {
+            project.open_image((worktree_id, rel_path("renamed.png")), cx)
+        })
+        .await
+        .unwrap();
+    assert_eq!(image, reopened);
+
+    for content in [Vec::new(), b"invalid image".to_vec()] {
+        fs.insert_file(path!("/media/invalid.png"), content).await;
+        assert!(
+            project
+                .update(cx, |project, cx| {
+                    project.open_image((worktree_id, rel_path("invalid.png")), cx)
+                })
+                .await
+                .is_err()
+        );
+    }
+}
+
 #[gpui::test]
 async fn test_remote_reload(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());

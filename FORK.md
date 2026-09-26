@@ -92,6 +92,20 @@ gh release view audio-zed-linux-latest --repo jolutz/zed
 Confirm the release targets the pushed commit and that both assets have fresh
 digests from the same successful workflow run.
 
+The release workflow runs local and remote audio/image reload tests on Linux
+before building and publishing the bundle. Run the focused regressions with:
+
+```sh
+cargo test -p project --features test-support --test integration test_media_reload_
+cargo test -p remote_server --lib test_remote_audio_reload
+cargo test -p remote_server --lib test_remote_image_reload
+```
+
+Remote media reload uses the existing open-by-path chunk transfer and updates
+the displayed item in place. Disk changes, rename, deletion/recreation, and rapid
+saves are covered by the remote filesystem tests. Invalid image replacements
+retain the last valid image and surface a reload error.
+
 ## Automation
 
 There is a weekly Codex automation named `update-zed-audio-fork`. It updates this

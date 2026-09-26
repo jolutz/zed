@@ -11,6 +11,7 @@ mod image_store;
 mod lsp_command;
 mod lsp_store;
 mod manifest_tree;
+mod media_reload;
 mod project_search;
 mod search;
 mod search_history;

@@ -3732,10 +3732,35 @@ impl Project {
 
     fn on_audio_event(
         &mut self,
-        _audio: Entity<AudioItem>,
-        _event: &AudioItemEvent,
-        _cx: &mut Context<Self>,
+        audio: Entity<AudioItem>,
+        event: &AudioItemEvent,
+        cx: &mut Context<Self>,
     ) {
+        if let AudioItemEvent::ReloadNeeded = event
+            && !self.is_via_collab()
+        {
+            let reload = self.audio_store.update(cx, |store, cx| {
+                store.reload_audios([audio].into_iter().collect(), cx)
+            });
+            self.report_media_reload(reload, cx);
+        }
+    }
+
+    fn report_media_reload(&self, reload: Task<Result<()>>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = reload.await {
+                log::error!("Failed to reload media: {error:#}");
+                this.update(cx, |_, cx| {
+                    cx.emit(Event::Toast {
+                        notification_id: "media-reload".into(),
+                        message: format!("Could not reload media: {error:#}"),
+                        link: None,
+                    });
+                })
+                .log_err();
+            }
+        })
+        .detach();
     }
 
     fn on_dap_store_event(
@@ -4147,12 +4172,11 @@ impl Project {
         event: &ImageItemEvent,
         cx: &mut Context<Self>,
     ) -> Option<()> {
-        // TODO: handle image events from remote
         if let ImageItemEvent::ReloadNeeded = event
             && !self.is_via_collab()
         {
-            self.reload_images([image].into_iter().collect(), cx)
-                .detach_and_log_err(cx);
+            let reload = self.reload_images([image].into_iter().collect(), cx);
+            self.report_media_reload(reload, cx);
         }
 
         None
