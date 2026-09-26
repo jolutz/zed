@@ -1501,6 +1501,10 @@ impl Project {
                     cx,
                 )
             });
+            cx.subscribe(&image_store, Self::on_image_store_event)
+                .detach();
+            cx.subscribe(&audio_store, Self::on_audio_store_event)
+                .detach();
             cx.subscribe(&buffer_store, Self::on_buffer_store_event)
                 .detach();
             let toolchain_store = cx.new(|cx| {
@@ -1918,6 +1922,10 @@ impl Project {
             cx.subscribe(&worktree_store, Self::on_worktree_store_event)
                 .detach();
 
+            cx.subscribe(&image_store, Self::on_image_store_event)
+                .detach();
+            cx.subscribe(&audio_store, Self::on_audio_store_event)
+                .detach();
             cx.subscribe(&buffer_store, Self::on_buffer_store_event)
                 .detach();
             cx.subscribe(&lsp_store, Self::on_lsp_store_event).detach();
