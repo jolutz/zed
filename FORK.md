@@ -89,8 +89,10 @@ gh run list --repo jolutz/zed --branch audio-file-viewer --limit 5
 gh release view audio-zed-linux-latest --repo jolutz/zed
 ```
 
-Confirm the release targets the pushed commit and that both assets have fresh
-digests from the same successful workflow run.
+Confirm the release's target commit and `audio-zed-linux-latest` Git tag both
+point to the pushed commit, and that both assets have fresh digests from the
+same successful workflow run. Editing a release's target commit does not move
+an existing Git tag.
 
 The release workflow runs local and remote audio/image reload tests on Linux
 before building and publishing the bundle. Run the focused regressions with:

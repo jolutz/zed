@@ -102,6 +102,11 @@ jobs:
             "$remote_server_asset" \
             --clobber
 
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$release_tag" \
+            -f sha="$GITHUB_SHA" \
+            -F force=true \
+            --silent
+
       - name: Verify published release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -110,6 +115,8 @@ jobs:
           release_tag="audio-zed-linux-latest"
           actual_target="$(gh release view "$release_tag" --json targetCommitish --jq '.targetCommitish')"
           test "$actual_target" = "$GITHUB_SHA"
+          actual_tag_target="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" --jq '.object.sha')"
+          test "$actual_tag_target" = "$GITHUB_SHA"
 
           for asset in \
             target/release/zed-linux-x86_64.tar.gz \
