@@ -524,9 +524,11 @@ message Envelope {
     ExecuteLspCommand execute_lsp_command = 491;
     ExecuteLspCommandResponse execute_lsp_command_response = 492;
     RefreshDocumentHighlights refresh_document_highlights = 493;
-    OpenAudioByPath open_audio_by_path = 494;
-    OpenAudioResponse open_audio_response = 495;
-    CreateAudioForPeer create_audio_for_peer = 496; // current max
+    GetTerminalShell get_terminal_shell = 494;
+    GetTerminalShellResponse get_terminal_shell_response = 495;
+    OpenAudioByPath open_audio_by_path = 496;
+    OpenAudioResponse open_audio_response = 497;
+    CreateAudioForPeer create_audio_for_peer = 498; // current max
   }
 
   reserved 87 to 88;
