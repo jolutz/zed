@@ -13,6 +13,11 @@ build with an MVP audio file viewer. The long-lived working branch is
 - Prefer merge-based updates over rebasing so weekly maintenance remains simple.
 - Push successful maintenance changes back to `origin/audio-file-viewer`.
 - Keep the custom build Linux-only unless Jon explicitly asks otherwise.
+- Resolve merge conflicts as part of maintenance, including upstream refactors,
+  while preserving the fork's custom functionality. Compare conflicting code
+  against the previous upstream release before assuming it is fork-specific.
+  Only leave an update incomplete when a concrete blocker prevents resolution;
+  conflict complexity alone is not a reason to skip a release.
 
 ## Audio Viewer Scope
 
