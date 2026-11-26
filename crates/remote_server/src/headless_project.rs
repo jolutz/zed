@@ -30,7 +30,7 @@ use project::{
     project_settings::SettingsObserver,
     search::SearchQuery,
     task_store::TaskStore,
-    trusted_worktrees::{PathTrust, RemoteHostLocation, TrustedWorktrees},
+    trusted_worktrees::{PathTrust, TrustedWorktrees},
     worktree_store::{WorktreeIdCounter, WorktreeStore},
 };
 use rpc::{
@@ -133,7 +133,7 @@ impl HeadlessProject {
         if init_worktree_trust {
             project::trusted_worktrees::track_worktree_trust(
                 worktree_store.clone(),
-                None::<RemoteHostLocation>,
+                None,
                 Some((session.clone(), ProjectId(REMOTE_SERVER_PROJECT_ID))),
                 None,
                 cx,
